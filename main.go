@@ -21,12 +21,13 @@ import (
 	"github.com/stupendoussuperpowers/witprox/pkg/tlsutils"
 
 	"bufio"
-	"golang.org/x/sys/unix"
-	"syscall"
 )
 
 func main() {
-
+	// The TLS proxy can only run if we have a generated certificate that is trusted by ths host computer.
+	// In order to generate and save a certicate to disk, use this flag. You'll be prompted to use this
+	// flag in case a cert file is not detected at `/tmp/witprox-ca.pem` or a key file is not detected at
+	// `/tmp/witprox-key.pem`
 	flagGenerate := flag.Bool("generate-ca", false, "Generate a new TLS certificate")
 	flag.Parse()
 
@@ -69,108 +70,6 @@ const proxyIDHeader = "X-Proxy-Req-Id"
 var (
 	startTimes sync.Map
 )
-
-func ServeHTTP() {
-	listener, err := net.Listen("tcp", "localhost:1233")
-	if err != nil {
-		log.Fatalf("Error listening on 1233 - %v\n", err)
-	}
-
-	for {
-		fmt.Println("Waiting for HTTP Connections")
-		conn, err := listener.Accept()
-		if err != nil {
-			if err == net.ErrClosed {
-				return
-			}
-
-			fmt.Printf("Error accepting HTTP connection: %v\n", err)
-			continue
-		}
-
-		go func(conn net.Conn) {
-			defer conn.Close()
-
-			fmt.Println("Remote Addr: %s", conn.RemoteAddr().String())
-			org, err := getOriginalDst(conn)
-			if err != nil {
-				fmt.Println("Error getting original destination:", err)
-				return
-			}
-
-			fmt.Printf("Destination: %s\n", org.String())
-
-			start := time.Now()
-
-			bufreader := bufio.NewReader(conn)
-			req, err := http.ReadRequest(bufreader)
-			if err != nil {
-				log.Printf("bad http req: %v\n", err)
-				return
-			}
-
-			dst, err := net.Dial("tcp", org.String())
-			if err != nil {
-				log.Printf("dial error %v\n", err)
-				return
-			}
-
-			defer dst.Close()
-
-			if err := req.Write(dst); err != nil {
-				log.Printf("write error: %v\n", err)
-				return
-			}
-
-			resp, err := http.ReadResponse(bufio.NewReader(dst), req)
-			if err != nil {
-				log.Printf("read error: %v\n", err)
-				return
-			}
-
-			rec, err := networklog.BuildNetworkRecord(req, resp, start, time.Now(), conn.RemoteAddr().String(), org.String())
-
-			if err := resp.Write(conn); err != nil {
-				log.Printf("failed to send to client: %v\n", err)
-				_ = resp.Body.Close()
-				return
-			}
-
-			_ = resp.Body.Close()
-
-			if err != nil {
-				fmt.Println("Build record failed")
-				return
-			}
-
-			err = networklog.AppendRecord(fmt.Sprintf("/tmp/proxy_%s.log", "http"), rec)
-			if err != nil {
-				fmt.Println("Append record failed")
-				return
-			}
-		}(conn)
-	}
-}
-
-func getOriginalDst(c net.Conn) (*net.TCPAddr, error) {
-	conn, _ := c.(*net.TCPConn)
-	file, err := conn.File()
-	if err != nil {
-		return nil, err
-	}
-
-	defer file.Close()
-
-	addr, err := unix.GetsockoptIPv6Mreq(int(file.Fd()), syscall.SOL_IP, 80)
-	if err != nil {
-		return nil, err
-	}
-
-	ip := net.IPv4(addr.Multiaddr[4], addr.Multiaddr[5], addr.Multiaddr[6], addr.Multiaddr[7])
-	port := int(addr.Multiaddr[2])<<8 + int(addr.Multiaddr[3])
-
-	return &net.TCPAddr{IP: ip, Port: port}, nil
-}
 
 func Run(listenAddr string) error {
 	proxyServer := goproxy.NewProxyHttpServer()
@@ -241,6 +140,88 @@ func Run(listenAddr string) error {
 	ServeHTTP()
 
 	return nil
+}
+
+// All HTTP traffic is proxied by this function, which acts as a middleware to perform logging.
+func ServeHTTP() {
+	listener, err := net.Listen("tcp", "localhost:1233")
+	if err != nil {
+		log.Fatalf("Error listening on 1233 - %v\n", err)
+	}
+
+	for {
+		fmt.Println("Waiting for HTTP Connections")
+		conn, err := listener.Accept()
+		if err != nil {
+			if err == net.ErrClosed {
+				return
+			}
+
+			fmt.Printf("Error accepting HTTP connection: %v\n", err)
+			continue
+		}
+
+		go func(conn net.Conn) {
+			defer conn.Close()
+
+			start := time.Now()
+
+			// Read the request sent by the client.
+			bufreader := bufio.NewReader(conn)
+			req, err := http.ReadRequest(bufreader)
+			if err != nil {
+				log.Printf("bad http req: %v\n", err)
+				return
+			}
+
+			// Connect to the originally intended target.
+			destAddr := fmt.Sprintf("%s:%d", req.Host, 80)
+			dst, err := net.Dial("tcp", destAddr)
+			if err != nil {
+				log.Printf("dial error %v\n", err)
+				return
+			}
+
+			defer dst.Close()
+			// Send the originally intended request to the target.
+			if err := req.Write(dst); err != nil {
+				log.Printf("write error: %v\n", err)
+				return
+			}
+
+			// Read the response received from the target.
+			resp, err := http.ReadResponse(bufio.NewReader(dst), req)
+			if err != nil {
+				log.Printf("read error: %v\n", err)
+				return
+			}
+
+			// Log response hash/size/etc.
+			fullyQualName := fmt.Sprintf("http://%s", destAddr)
+			rec, err := networklog.BuildNetworkRecord(req, resp, start, time.Now(), conn.RemoteAddr().String(), fullyQualName)
+
+			// Forward the response back to the original client.
+			if err := resp.Write(conn); err != nil {
+				log.Printf("failed to send to client: %v\n", err)
+				_ = resp.Body.Close()
+				return
+			}
+
+			_ = resp.Body.Close()
+
+			if err != nil {
+				fmt.Println("Build record failed")
+				return
+			}
+
+			// Save log to a log file.
+			err = networklog.AppendRecord(fmt.Sprintf("/tmp/proxy_%s.log", "http"), rec)
+			if err != nil {
+				fmt.Println("Append record failed")
+				return
+			}
+		}(conn)
+	}
 }
 
 func ServeTLS(proxyServer *goproxy.ProxyHttpServer) {
