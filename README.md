@@ -2,9 +2,9 @@
 
 This repo provides a binary that runs transparent HTTP and TLS proxy servers that log request/response pairs to disk.
 
-The HTTP proxy is straightforward. For TLS, a trusted certificate is required. This binary can generate certificates that be added to the client machine's trusted store.
+The HTTP proxy is straightforward. For TLS, a trusted certificate is required. This binary can generate certificates that can be added to the client machine's trusted store.
 
-TLS proxies use two TLS connecions: client <-> proxy <-> original target. This allows the proxy to decrypt and log traffic. The `goproxy` package handles a lot of MITM and TLS certificate management.
+TLS proxies use two TLS connecions: `client <-1-> proxy <-2-> original target`. This allows the proxy to decrypt and log traffic. The `goproxy` package handles most of the MITM for certificate management.
 
 Proxies are transparent so programs don't need modifications as long as any traffic intended for logging are redirected to the correct proxy ports. Some ways to achieve these are explored below.
 
@@ -63,7 +63,8 @@ Two simple ways to achieve these:
 
     `LD_PRELOAD=/path/to/connectldp.so npm install --prefer-online`
 
-    This approach is much more limited, given that we need to LD_PRELOAD all programs to be monitored individually. It also make it much harder to described filters.
+    This approach is much more limited, given that all programs to be monitored need to be LD_PRELOAD'd individually. It's also much harder to describe filters.
+  
 ---
 ### Sample Logs
 
@@ -71,11 +72,10 @@ By default the logs are stored in `/tmp/witprox.tls.log` and `/tmp/witprox.http.
 
 Each HTTP(S) Request/Response pair is stored as JSON in these log files as a newline, which can be later inspected using tools such as `jq`. 
 
-
-Example log from running `npm install` - 
+Example log from running `npm install is-even` - 
 
 ```
-$> tail -1 /tmp/witprox.tls.log | jq
+$> tail /tmp/witprox.tls.log | jq
 
 {
   "timestamp": "2025-09-14T03:19:56.357272801Z",
