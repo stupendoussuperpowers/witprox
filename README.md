@@ -1,61 +1,82 @@
-Build with: `go build -o proxy -buildvcs=false main.go`
+## Transparent TLS and HTTP Proxy
 
-Generate a certificate first - 
+This repo provides a binary that runs transparent HTTP and TLS proxy servers that log request/response pairs to disk.
+
+The HTTP proxy is straightforward. For TLS, a trusted certificate is required. This binary can generate certificates that be added to the client machine's trusted store.
+
+TLS proxies use two TLS connecions: client <-> proxy <-> original target. This allows the proxy to decrypt and log traffic. The `goproxy` package handles a lot of MITM and TLS certificate management.
+
+Proxies are transparent so programs don't need modifications as long as any traffic intended for logging are redirected to the correct proxy ports. Some ways to achieve these are explored below.
+
+### Initial Configurations
+
+#### Build
+
+`go build -o proxy -buildvcs=false main.go`
+
+#### Generate a certificate
 
 `./proxy --generate-ca`
 
-Trust this certificate on the client (example for Debian/Ubuntu) - 
+#### Trust this certificate on the client (example for Debian/Ubuntu) - 
 
 ```
 cp /tmp/witprox-ca.pem /usr/local/share/ca-certificates/
-
 cp /tmp/witprox-key.pem /usr/local/share/ca-certificates/
-
-update-ca-certificates`
+sudo update-ca-certificates
 ```
 
-Run proxy in the background - 
+#### Run proxy in the background
 
 `./proxy`
 
+#### Redirect traffic to proxies
 
---- 
+If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80` traffic to `localhost:1233`
 
-If using default ports, we need to redirect all `:443` to `localhost:1234` and `:80` to `localhost:1233`
+Two simple ways to achieve these:
 
-Currently, two simplest ways to do that are:
+- **iptables**
 
-- iptables
+    For linux systems, `iptables` can be used to [redirect traffic](https://linux.die.net/man/8/iptables#:~:text=raw%20table.-,REDIRECT,-This%20target%20is) that meets a certain set of requirements to a local port. In the example below we are redirecting all port `80` and `443` traffic from the user `builduser` to our proxies. 
 
-```
-sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner --uid-owner builduser -j REDIRECT --to-ports 1233
+    ```
+    sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner --uid-owner builduser -j REDIRECT --to-ports 1233
+    sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner --uid-owner builduser -j REDIRECT --to-ports 1234
+    ```
 
-sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner --uid-owner builduser -j REDIRECT --to-ports 1234
-```
+    If the `builduser` now runs a build command such as `npm install`, all traffic to the npm registry is now routed through our TLS proxy running on port 1234.
 
-This is an example use of iptables, here we assume that `builduser` is the user who's network requests we need to log. 
+    `iptables` can also be used in several complex configurations depending on which traffic required monitoring.
 
-Now, if we run something like `npm install --prefer-online` through the `builduser`, we are able to log any TLS or HTTP calls that are made.
+    This is the approach adopted by oss-rebuild as well.
 
-- LD_PRELOAD
+- **LD_PRELOAD**
 
-We can also preload the `connect()` syscall, and manually edit the destination address and port if the network is a TCP packet headed to port 443 or 80. An example LD_PRELOAD code is present in `internal/connectldp.c`
+    We can also preload the `connect()` syscall, and manually edit the destination address and port if the network is a TCP packet headed to port `443` or `80`. An example `LD_PRELOAD` code is present in `internal/connectldp.c`
 
-Compile using:
+    Compile using:
 
-`cc -shared -fPIC -o connectldp.so connectldp.c -ldl`
+    `cc -shared -fPIC -o connectldp.so connectldp.c -ldl`
 
-Example usage:
+    Example usage:
 
-`LD_PRELOAD=/path/to/connectldp.so npm install --prefer-online`
+    `LD_PRELOAD=/path/to/connectldp.so npm install --prefer-online`
 
---- 
+    This approach is much more limited, given that we need to LD_PRELOAD all programs to be monitored individually. It also make it much harder to described filters.
+---
+### Sample Logs
 
 By default the logs are stored in `/tmp/witprox.tls.log` and `/tmp/witprox.http.log`
 
-Example log of one of the connections made by from a `npm install` - 
+Each HTTP(S) Request/Response pair is stored as JSON in these log files as a newline, which can be later inspected using tools such as `jq`. 
+
+
+Example log from running `npm install` - 
 
 ```
+$> tail -1 /tmp/witprox.tls.log | jq
+
 {
   "timestamp": "2025-09-14T03:19:56.357272801Z",
   "duration_ms": 9223372036854,
@@ -139,3 +160,21 @@ Example log of one of the connections made by from a `npm install` -
   }
 }
 ```
+
+--- 
+### Configurable Settings
+
+Command line flags for `./proxy`
+
+| Argument | Default Value | Description | 
+| -------- | ------------- | ----------- |
+| `--generate-ca` |  `false` | Generate a new TLS certificate and terminate early. | 
+| `--verbose` | `false` | Enable verbose logs for `goproxy` TLS server.|
+| `--tls-port` | `1234` | Configure the TLS Port on localhost | 
+| `--http-port` |  `1233` | Configure the HTTP Port on localhost | 
+| `--cert-path` | `/tmp/witprox-ca.pem` | TLS Certificate Path | 
+| `--key-path` | `/tmp/witprox-key.pem` | TLS Certificate Key Path | 
+| `--http-log` |  `/tmp/witprox.http.log` | Log file for HTTP requests | 
+| `--tls-log` | `/tmp/witprox.tls.log` | Log file for TLS requests |
+
+
