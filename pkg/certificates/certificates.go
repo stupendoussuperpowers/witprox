@@ -8,9 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"os"
+	"os/exec"
+	"runtime"
 	"time"
 )
 
@@ -42,6 +46,43 @@ func LoadCA(caCertPath string, caKeyPath string) *tls.Certificate {
 	return &cert
 }
 
+func InstallCA(caCertPath string) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("Cert installation not supported for this platform")
+	}
+
+	targetPath := "/usr/local/share/ca-certificates/witprox.crt"
+
+	src, err := os.Open(caCertPath)
+	if err != nil {
+		return fmt.Errorf("Cert not found: %v", err)
+	}
+
+	defer src.Close()
+
+	dst, err := os.Create(targetPath)
+	if err != nil {
+		return fmt.Errorf("Create target cert: %v", err)
+	}
+
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("Copy cert: %w", err)
+	}
+
+	cmd := exec.Command("update-ca-certificates")
+	//cmd.Stdout = os.Stdout
+	//cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("update-ca-certificates failed: %v", err)
+	}
+
+	fmt.Println("Certificate installed")
+
+	return nil
+}
+
 //
 // The following util functions have been borrowed from: github.com/google/oss-rebuild project.
 //
@@ -64,7 +105,8 @@ func GenerateCA() *tls.Certificate {
 	// TODO: Switch to ed25519.
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		log.Fatalf("failed to generate key: %v", err)
+		fmt.Printf("failed to generate key: %v\n", err)
+		return nil
 	}
 	caBytes, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &priv.PublicKey, priv)
 	if err != nil {

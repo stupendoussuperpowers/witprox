@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 
+	"errors"
 	"github.com/elazarl/goproxy"
 
 	"time"
@@ -35,6 +36,7 @@ type WitproxConfig struct {
 	KeyPath  string
 	HTTPLog  string
 	TLSLog   string
+	Verbose  bool
 }
 
 const proxyIDHeader = "X-Proxy-Req-Id"
@@ -49,12 +51,14 @@ var (
 func main() {
 	// This flag is used if we need to generate a fresh TLS certificate. More details are documented below.
 	flagGenerate := flag.Bool("generate-ca", false, "Generate a new TLS certificate")
+	flagInstall := flag.Bool("install-ca", false, "Install the certificate at cert-path. Only supported on Debian/Ubunut.")
 	flagTLSPort := flag.Int64("tls-port", 1234, "Configure the TLS Port on localhost")
 	flagHTTPPort := flag.Int64("http-port", 1233, "Configure the HTTP Port on localhost")
-	flagCaPath := flag.String("cert-path", "/tmp/witprox-ca.pem", "TLS Certificate Path")
-	flagKeyPath := flag.String("key-path", "/tmp/witprox-key.pem", "TLS Certificate Path")
+	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate Path")
+	flagKeyPath := flag.String("key-path", "/tmp/witproxkey.pem", "TLS Certificate Path")
 	flagHTTPLog := flag.String("http-log", "/tmp/witprox.http.log", "Log file for HTTP requests")
 	flagTLSLog := flag.String("tls-log", "/tmp/witprox.tls.log", "Log file for TLS requests")
+	flagVerbose := flag.Bool("verbose", false, "Goproxy verbose logs")
 
 	flag.Parse()
 
@@ -65,6 +69,7 @@ func main() {
 		KeyPath:  *flagKeyPath,
 		HTTPLog:  *flagHTTPLog,
 		TLSLog:   *flagTLSLog,
+		Verbose:  *flagVerbose,
 	}
 
 	// The workflow is to try to load the certificate stored at config.CaPath and the key at config.KeyPath.
@@ -73,19 +78,35 @@ func main() {
 	//
 	// To trust a certificate on Debian/Ubuntu for example. We need to copy the certificate to /usr/local/share/ca-certificates
 	// And then run update-ca-certificates.
+
+	if *flagInstall {
+		err := certificates.InstallCA(config.CaPath)
+		if err != nil {
+			fmt.Printf("Unable to install certificate at path %s with error: %v\n\n", config.CaPath, err)
+			fmt.Printf("New cert generated and saved to (%s). Add it to the trusted certs on your system\n", config.CaPath)
+		}
+
+		return
+	}
+
 	ca := certificates.LoadCA(config.CaPath, config.KeyPath)
 
 	if *flagGenerate {
-		log.Printf("Generating a new TLS certificate at %s", config.CaPath)
+		fmt.Printf("Generating a new TLS certificate at %s\n", config.CaPath)
+
 		ca = certificates.GenerateCA()
+		if ca == nil {
+			return
+		}
+
 		certificates.PersistCA(ca, config.CaPath, config.KeyPath)
-		log.Printf("New cert and key generated and saved to (%s, %s). Add it to the trusted certs on your system\n", config.CaPath, config.KeyPath)
+		fmt.Println("Use --install-ca to install cert locally.")
 		return
 	} else if ca == nil {
-		log.Println("No existing certificate. Use --generate-ca to generate and save a certificate.")
+		fmt.Println("No existing certificate. Use --generate-ca to generate and save a certificate.")
 		return
 	} else {
-		log.Println("Loaded existing certificate")
+		log.Printf("Loaded certificate at %s\n", config.CaPath)
 	}
 
 	ConfigureCert(ca)
@@ -106,6 +127,9 @@ func main() {
 	HTTPListener.Close()
 }
 
+// This setups up the goproxy so that it can use it's MITM confic and serve the certificate we generated
+// to the client process making the network calls. To view more logs of this works, use --verbose flags.
+// Documentation: https://pkg.go.dev/github.com/elazarl/goproxy#readme-proxy-modes
 func ConfigureCert(ca *tls.Certificate) {
 	goproxy.OkConnect = &goproxy.ConnectAction{
 		Action: goproxy.ConnectAccept, TLSConfig: goproxy.TLSConfigFromCA(ca)}
@@ -123,7 +147,7 @@ func ConfigureCert(ca *tls.Certificate) {
 func ServeTLS() {
 	logCat := log.New(os.Stdout, "[TLS] ", log.LstdFlags|log.Lmsgprefix)
 	proxyServer := goproxy.NewProxyHttpServer()
-	proxyServer.Verbose = true
+	proxyServer.Verbose = config.Verbose
 
 	// Tag requests before sending it to the server so that we can use it to store custom metrics. (Start time in
 	// this case).
@@ -138,7 +162,7 @@ func ServeTLS() {
 	})
 
 	proxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		logCat.Printf("Response: %s %s\n", res.Request.Method, res.Request.URL)
+		logCat.Printf("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
 
 		// Use the earlier used tag to retrieve custom logging metrics, and then delete this tag before it gets
 		// stored in the log.
@@ -189,7 +213,8 @@ func ServeTLS() {
 		HandleConnect(goproxy.AlwaysMitm)
 
 	// Run TLS Server
-	TLSListener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", config.TLSPort))
+	var err error
+	TLSListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", config.TLSPort))
 	if err != nil {
 		log.Fatalf("Error listening on %d", config.TLSPort)
 	}
@@ -202,7 +227,7 @@ func ServeTLS() {
 		logCat.Println("Waiting for connections")
 		conn, err := TLSListener.Accept()
 		if err != nil {
-			if err == net.ErrClosed {
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 			logCat.Printf("Error accepting connection: %v\n", err)
@@ -243,6 +268,7 @@ func ServeTLS() {
 			}
 
 			// This custom writer makes sure that we don't send a duplicate CONNECT response back to the client.
+			// It "eats" the CONNECT response.
 			ecrw := tlsutils.EatConnectResponseWriter{conn}
 			proxyServer.ServeHTTP(ecrw, connectReq)
 		}(conn)
@@ -253,7 +279,9 @@ func ServeTLS() {
 // and logs them.
 func ServeHTTP() {
 	logCat := log.New(os.Stdout, "[HTTP] ", log.Lmsgprefix|log.LstdFlags)
-	HTTPListener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", config.HTTPPort))
+
+	var err error
+	HTTPListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", config.HTTPPort))
 	if err != nil {
 		log.Fatalf("Error listening on %d - %v\n", config.HTTPPort, err)
 	}
@@ -264,7 +292,7 @@ func ServeHTTP() {
 		logCat.Println("Waiting for HTTP Connections")
 		conn, err := HTTPListener.Accept()
 		if err != nil {
-			if err == net.ErrClosed {
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 
@@ -274,6 +302,8 @@ func ServeHTTP() {
 
 		go func(conn net.Conn) {
 			defer conn.Close()
+
+			logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
 
 			start := time.Now()
 

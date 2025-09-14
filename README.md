@@ -8,6 +8,8 @@ TLS proxies use two TLS connecions: `client <-1-> proxy <-2-> original target`. 
 
 Proxies are transparent so programs don't need modifications as long as any traffic intended for logging are redirected to the correct proxy ports. Some ways to achieve these are explored below.
 
+Conversely, the proxy doesn't need any information about the processes either, they just take as an input HTTP/TLS traffic and redirect it back to the calling connection.
+
 ### Initial Configurations
 
 #### Build
@@ -26,13 +28,17 @@ cp /tmp/witprox-key.pem /usr/local/share/ca-certificates/
 sudo update-ca-certificates
 ```
 
+If using a certificate that is already trusted by the client, skip `--generate-ca` flow and use `--cert-path` to provide this certificate.
+
+`oss-rebuild` wraps individual package managers. It provides environment variables to ensure the package manager trusts the certificates it generates. (For e.g. `PIP_CERT` for `pip`, `CURL_CA_BUNDLE` for `curl` , `NODE_EXTRA_CA_CERTS` for `npm`). This removes the need for a globally trusted certificate on the client machine.
+
 #### Run proxy in the background
 
 `./proxy`
 
 #### Redirect traffic to proxies
 
-If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80` traffic to `localhost:1233`
+If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80` traffic to `localhost:1233`. For custom ports, redirect `:443` traffic to `localhost:<tls-port>` and `:80` traffic to `localhost:<http-port>`.
 
 Two simple ways to achieve these:
 
@@ -47,7 +53,7 @@ Two simple ways to achieve these:
 
     If the `builduser` now runs a build command such as `npm install`, all traffic to the npm registry is now routed through our TLS proxy running on port 1234.
 
-    `iptables` can also be used in several complex configurations depending on which traffic required monitoring.
+    `iptables` can also be used in several complex configurations depending on which traffic requires monitoring.
 
     This is the approach adopted by oss-rebuild as well.
 
