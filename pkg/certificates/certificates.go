@@ -14,12 +14,7 @@ import (
 	"time"
 )
 
-var (
-	caCertPath = "/tmp/ca.pem"
-	caKeyPath  = "/tmp/ca-key.pem"
-)
-
-func PersistCA(ca *tls.Certificate) {
+func PersistCA(ca *tls.Certificate, caCertPath string, caKeyPath string) {
 	certOut := new(bytes.Buffer)
 	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: ca.Certificate[0]})
 	os.WriteFile(caCertPath, certOut.Bytes(), 0644)
@@ -30,7 +25,7 @@ func PersistCA(ca *tls.Certificate) {
 	os.WriteFile(caKeyPath, keyOut.Bytes(), 0600)
 }
 
-func LoadCA() *tls.Certificate {
+func LoadCA(caCertPath string, caKeyPath string) *tls.Certificate {
 	if _, err := os.Stat(caCertPath); err != nil {
 		return nil
 	}
@@ -46,6 +41,10 @@ func LoadCA() *tls.Certificate {
 	cert.Leaf = caLeaf
 	return &cert
 }
+
+//
+// The following util functions have been borrowed from: github.com/google/oss-rebuild project.
+//
 
 // GenerateCA generates a ca certificate.
 func GenerateCA() *tls.Certificate {

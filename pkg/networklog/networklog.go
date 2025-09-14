@@ -13,16 +13,18 @@ import (
 )
 
 type NetworkRecord struct {
-	Timestamp  time.Time `json:"timestamp"`
-	DurationMs int64     `json:"duration_ms"`
-	Method     string    `json:"method"`
-	URL        string    `json:"url"`
-	StatusCode int       `json:"status_code"`
-	ClientAddr string    `json:"client_addr"`
-	BytesSent  int64     `json:"bytes_sent"`
-	BytesRecv  int64     `json:"bytes_recv"`
-	ReqHash    string    `json:"req_hash"`
-	ResHash    string    `json:"res_hash"`
+	Timestamp  time.Time           `json:"timestamp"`
+	DurationMs int64               `json:"duration_ms"`
+	Method     string              `json:"method"`
+	URL        string              `json:"url"`
+	StatusCode int                 `json:"status_code"`
+	ClientAddr string              `json:"client_addr"`
+	BytesSent  int64               `json:"bytes_sent"`
+	BytesRecv  int64               `json:"bytes_recv"`
+	ReqHash    string              `json:"req_hash"`
+	ResHash    string              `json:"res_hash"`
+	ResHeaders map[string][]string `json:"res_headers"`
+	ReqHeaders map[string][]string `json:"req_headers"`
 }
 
 func AppendRecord(path string, rec *NetworkRecord) error {
@@ -71,6 +73,8 @@ func BuildNetworkRecord(req *http.Request, resp *http.Response, start, end time.
 		Method:     req.Method,
 		URL:        fmt.Sprintf("%s%s", destAddr, req.URL.String()),
 		ClientAddr: clientAddr,
+		ResHeaders: resp.Header,
+		ReqHeaders: req.Header,
 	}
 
 	if req.Body != nil {
@@ -94,5 +98,4 @@ func BuildNetworkRecord(req *http.Request, resp *http.Response, start, end time.
 	}
 
 	return rec, nil
-
 }
