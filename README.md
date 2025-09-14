@@ -4,11 +4,11 @@ This repo provides a binary that runs transparent HTTP and TLS proxy servers tha
 
 The HTTP proxy is straightforward. For TLS, a trusted certificate is required. This binary can generate certificates that can be added to the client machine's trusted store.
 
-TLS proxies use two TLS connecions: `client <-1-> proxy <-2-> original target`. This allows the proxy to decrypt and log traffic. The `goproxy` package handles most of the MITM for certificate management.
+TLS proxy uses two TLS connecions: `client <-1-> proxy <-2-> original target`. This allows the proxy to decrypt and log traffic. The `goproxy` package handles most of the MITM for certificate management with the client.
 
-Proxies are transparent so programs don't need modifications as long as any traffic intended for logging are redirected to the correct proxy ports. Some ways to achieve these are explored below.
+Proxies are transparent so programs don't need modifications as long as any traffic intended for logging is redirected to the correct ports. Some ways to achieve these are explored below.
 
-Conversely, the proxy doesn't need any information about the processes either, they just take as an input HTTP/TLS traffic and redirect it back to the calling connection.
+Conversely, the proxy doesn't need any information about the processes either, they just take as input HTTP/TLS traffic and redirect it back to the calling process after logging.
 
 ### Initial Configurations
 
@@ -23,8 +23,7 @@ Conversely, the proxy doesn't need any information about the processes either, t
 #### Trust this certificate on the client (example for Debian/Ubuntu) - 
 
 ```
-cp /tmp/witprox-ca.pem /usr/local/share/ca-certificates/
-cp /tmp/witprox-key.pem /usr/local/share/ca-certificates/
+cp /tmp/witproxca.crt /usr/local/share/ca-certificates/
 sudo update-ca-certificates
 ```
 
@@ -178,9 +177,7 @@ Command line flags for `./proxy`
 | `--verbose` | `false` | Enable verbose logs for `goproxy` TLS server.|
 | `--tls-port` | `1234` | Configure the TLS Port on localhost | 
 | `--http-port` |  `1233` | Configure the HTTP Port on localhost | 
-| `--cert-path` | `/tmp/witprox-ca.pem` | TLS Certificate Path | 
-| `--key-path` | `/tmp/witprox-key.pem` | TLS Certificate Key Path | 
+| `--cert-path` | `/tmp/witproxca.crt` | TLS Certificate Path | 
+| `--key-path` | `/tmp/witproxkey.pem` | TLS Certificate Key Path | 
 | `--http-log` |  `/tmp/witprox.http.log` | Log file for HTTP requests | 
 | `--tls-log` | `/tmp/witprox.tls.log` | Log file for TLS requests |
-
-
