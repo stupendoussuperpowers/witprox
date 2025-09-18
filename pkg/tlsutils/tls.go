@@ -113,7 +113,24 @@ func (pc peekedConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func PeekClientHelloBufReader(c net.Conn, br *bufio.Reader) (net.Conn, *ClientHelloMsg, error) {
+	buf := new(bytes.Buffer)
+	data, err := nextRecord(br, buf)
+	if err != nil {
+		return nil, nil, err
+	}
+	if data[0] != typeClientHello {
+		return nil, nil, errors.New("tls: unexpected message")
+	}
+	m := newClientHelloMsg(data)
+	if m == nil {
+		return nil, nil, errors.New("tls: failed to parse ClientHello")
+	}
+	return peekedConn{c, buf}, m, err
+}
+
 // PeekClientHello reads the ClientHello TLS handshake record and returns it as well as a Conn without it read.
+
 func PeekClientHello(c net.Conn) (net.Conn, *ClientHelloMsg, error) {
 	buf := new(bytes.Buffer)
 	data, err := nextRecord(c, buf)

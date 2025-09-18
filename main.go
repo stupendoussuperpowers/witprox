@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"runtime"
 	"fmt"
+	"io"
+	"strings"
 	"log"
 	"net"
 	"net/http"
@@ -27,22 +30,24 @@ import (
 	"github.com/stupendoussuperpowers/witprox/pkg/tlsutils"
 
 	"bufio"
+
+	"golang.org/x/sys/unix"
 )
 
 type WitproxConfig struct {
-	TLSPort  int64
-	HTTPPort int64
+	LPort int
 	CaPath   string
 	KeyPath  string
-	HTTPLog  string
-	TLSLog   string
+	Log   string
 	Verbose  bool
+	ProxyServer *goproxy.ProxyHttpServer
 }
 
 const proxyIDHeader = "X-Proxy-Req-Id"
 
 var (
 	startTimes   sync.Map
+	TCPListener  net.Listener
 	TLSListener  net.Listener
 	HTTPListener net.Listener
 	config       WitproxConfig
@@ -51,24 +56,20 @@ var (
 func main() {
 	// This flag is used if we need to generate a fresh TLS certificate. More details are documented below.
 	flagGenerate := flag.Bool("generate-ca", false, "Generate a new TLS certificate")
-	flagInstall := flag.Bool("install-ca", false, "Install the certificate at cert-path. Only supported on Debian/Ubunut.")
-	flagTLSPort := flag.Int64("tls-port", 1234, "Configure the TLS Port on localhost")
-	flagHTTPPort := flag.Int64("http-port", 1233, "Configure the HTTP Port on localhost")
+	flagInstall := flag.Bool("install-ca", false, "Install the certificate at cert-path. Only supported on Debian/Ubuntu.")
 	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate Path")
 	flagKeyPath := flag.String("key-path", "/tmp/witproxkey.pem", "TLS Certificate Path")
-	flagHTTPLog := flag.String("http-log", "/tmp/witprox.http.log", "Log file for HTTP requests")
-	flagTLSLog := flag.String("tls-log", "/tmp/witprox.tls.log", "Log file for TLS requests")
+	flagLog := flag.String("log", "/tmp/witprox.log", "Log file")
 	flagVerbose := flag.Bool("verbose", false, "Goproxy verbose logs")
+	flagPort := flag.Int("port", 1230, "Start listener on this port")
 
 	flag.Parse()
 
 	config = WitproxConfig{
-		TLSPort:  *flagTLSPort,
-		HTTPPort: *flagHTTPPort,
+		LPort: *flagPort,
 		CaPath:   *flagCaPath,
 		KeyPath:  *flagKeyPath,
-		HTTPLog:  *flagHTTPLog,
-		TLSLog:   *flagTLSLog,
+		Log: *flagLog,
 		Verbose:  *flagVerbose,
 	}
 
@@ -109,49 +110,29 @@ func main() {
 		log.Printf("Loaded certificate at %s\n", config.CaPath)
 	}
 
-	ConfigureCert(ca)
+	SetupTLS(ca)
 
-	// Start a HTTP and TLS server to monitor these calls.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-
-	go ServeTLS()
-	go ServeHTTP()
-
+	go ServeMain()
 	<-ctx.Done()
 
 	stop()
 
-	log.Println("Shutting down proxy servers.")
+	TCPListener.Close()
 
-	TLSListener.Close()
-	HTTPListener.Close()
+	log.Println("Shutting down proxy server")
 }
 
-// This setups up the goproxy so that it can use it's MITM confic and serve the certificate we generated
-// to the client process making the network calls. To view more logs of this works, use --verbose flags.
-// Documentation: https://pkg.go.dev/github.com/elazarl/goproxy#readme-proxy-modes
-func ConfigureCert(ca *tls.Certificate) {
-	goproxy.OkConnect = &goproxy.ConnectAction{
-		Action: goproxy.ConnectAccept, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+func SetupTLS(ca *tls.Certificate) {
+	ConfigureCert(ca)
 
-	goproxy.MitmConnect = &goproxy.ConnectAction{
-		Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
-
-	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{
-		Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
-
-	goproxy.RejectConnect = &goproxy.ConnectAction{
-		Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(ca)}
-}
-
-func ServeTLS() {
-	logCat := log.New(os.Stdout, "[TLS] ", log.LstdFlags|log.Lmsgprefix)
-	proxyServer := goproxy.NewProxyHttpServer()
-	proxyServer.Verbose = config.Verbose
+	config.ProxyServer = goproxy.NewProxyHttpServer()
+	config.ProxyServer.Verbose = config.Verbose
 
 	// Tag requests before sending it to the server so that we can use it to store custom metrics. (Start time in
 	// this case).
-	proxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	config.ProxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		logCat := fLogger()
 		logCat.Printf("Request: %s %s\n", req.Method, req.URL)
 
 		id := uuid.NewString()
@@ -161,7 +142,8 @@ func ServeTLS() {
 		return req, nil
 	})
 
-	proxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	config.ProxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+		logCat := fLogger()
 		logCat.Printf("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
 
 		// Use the earlier used tag to retrieve custom logging metrics, and then delete this tag before it gets
@@ -192,16 +174,16 @@ func ServeTLS() {
 			clientAddr = res.Request.RemoteAddr
 		}
 
-		rec, err := networklog.BuildNetworkRecord(res.Request, res, start, time.Now(), clientAddr, "")
+		rec, err := networklog.BuildHTTPRecord(res.Request, res, start, time.Now(), clientAddr, "", "HTTPS")
 
 		if err != nil {
-			logCat.Println("Build record failed")
+			log.Println("Build record failed")
 			return res
 		}
 
-		err = networklog.AppendRecord(config.TLSLog, rec)
+		err = networklog.AppendRecord(config.Log, rec)
 		if err != nil {
-			logCat.Println("Append record failed")
+			log.Println("Append record failed")
 			return res
 		}
 
@@ -209,162 +191,337 @@ func ServeTLS() {
 	})
 
 	// Use goproxy's MITM config for all TLS requests.
-	proxyServer.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*:443$"))).
+	config.ProxyServer.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*:443$"))).
 		HandleConnect(goproxy.AlwaysMitm)
+}
 
-	// Run TLS Server
-	var err error
-	TLSListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", config.TLSPort))
-	if err != nil {
-		log.Fatalf("Error listening on %d", config.TLSPort)
+func fLogger() *log.Logger {
+	pc, _, _, ok := runtime.Caller(1)
+	prefix := ""
+	if ok {
+		fn := runtime.FuncForPC(pc)
+		if fn != nil {
+			prefix = fmt.Sprintf("[%s] ", fn.Name())
+		}
 	}
 
-	logCat.Printf("TLS Server listening on port: %d", config.TLSPort)
+	return log.New(os.Stdout, prefix, log.LstdFlags|log.Lmsgprefix)
+}
 
-	var inflight sync.WaitGroup
+// This setups up the goproxy so that it can use it's MITM confic and serve the certificate we generated
+// to the client process making the network calls. To view more logs of this works, use --verbose flags.
+// Documentation: https://pkg.go.dev/github.com/elazarl/goproxy#readme-proxy-modes
+func ConfigureCert(ca *tls.Certificate) {
+	goproxy.OkConnect = &goproxy.ConnectAction{
+		Action: goproxy.ConnectAccept, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+
+	goproxy.MitmConnect = &goproxy.ConnectAction{
+		Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+
+	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{
+		Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+
+	goproxy.RejectConnect = &goproxy.ConnectAction{
+		Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+}
+
+func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
+    logCat := fLogger()
+    br := bufio.NewReader(c)
+
+    logCat.Println("Inside detectprotocol")
+
+    // Peek at the first 24 bytes (enough for TLS, HTTP, HTTP/2 detection)
+    header, err := br.Peek(24)
+    if err != nil && err != bufio.ErrBufferFull {
+        logCat.Println("Error!", err)
+	return "", nil, err 
+    }
+
+    logCat.Println("Inside detectprotocol")
+    if len(header) >= 5 {
+        // TLS: check ContentType + Version
+        if header[0] == 0x16 && header[1] == 0x03 &&
+            (header[2] == 0x00 || header[2] == 0x01 || header[2] == 0x02 || header[2] == 0x03) {
+            return "tls", br, nil
+        }
+    }
+
+    logCat.Println("Inside detectprotocol")
+    if len(header) >= 8 {
+        s := string(header)
+        // HTTP/1.x methods
+        methods := []string{"GET", "POST", "PUT", "HEAD", "OPTIONS", "DELETE", "PATCH", "CONNECT", "TRACE"}
+        for _, m := range methods {
+            if strings.HasPrefix(s, m) {
+                return "http", br, nil
+            }
+        }
+
+    	logCat.Println("[loop] Inside detectprotocol")
+        // HTTP/2 connection preface
+        if s == "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" || strings.HasPrefix(s, "PRI * HTTP/2") {
+            return "http2", br, nil
+        }
+    }
+
+    logCat.Println("Inside detectprotocol")
+    // Fallback: could be plain text or unknown binary protocol
+    logCat.Println("Unknown TCP stream") 
+    return "unknown", br, nil
+}
+
+func ServeMain() {
+	var err error
+	TCPListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", config.LPort))
+	
+	if err != nil {
+		log.Printf("Error listening on port 1230\n")
+		return
+	}
 
 	for {
-		logCat.Println("Waiting for connections")
-		conn, err := TLSListener.Accept()
+		conn, err := TCPListener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			logCat.Printf("Error accepting connection: %v\n", err)
-			continue
+			log.Fatalf("Error listening on 1230\n")
 		}
 
-		inflight.Add(1)
-
-		defer inflight.Done()
-
 		go func(c net.Conn) {
-			logCat.Println("Connection from: ", c.RemoteAddr())
-
-			// We read the TLS Hello message sent by the client to get information about
-			// the original intended target. Unlike HTTP this is not transparently available
-			// and needs some parsing on our end.
-			conn, hello, err := tlsutils.PeekClientHello(c)
+			proto, br, err := detectProtocol(c)
 			if err != nil {
-				logCat.Printf("Error peaking tls - %v\n", err)
+				log.Println("Error in detect Protocol:", err)
+				c.Close()
 				return
 			}
 
-			host := hello.ServerName
-			if host == "" {
-				logCat.Println("Non SNI client")
-				return
+			log.Println("Proto: ", proto)
+			switch proto {
+			case "http":
+				handleHTTP(c, br)
+			case "tls":
+				handleTLS(c, br)
+			default:
+				handleTCP(c, br)
 			}
-
-			// Create a custom CONNECT request to the original target, and then forward it to the client.
-			connectReq := &http.Request{
-				Method: "CONNECT",
-				URL: &url.URL{
-					Host: net.JoinHostPort(host, "443"),
-				},
-				Host:       net.JoinHostPort(host, "443"),
-				Header:     make(http.Header),
-				RemoteAddr: c.RemoteAddr().String(),
-			}
-
-			// This custom writer makes sure that we don't send a duplicate CONNECT response back to the client.
-			// It "eats" the CONNECT response.
-			ecrw := tlsutils.EatConnectResponseWriter{conn}
-			proxyServer.ServeHTTP(ecrw, connectReq)
 		}(conn)
 	}
 }
 
-// Logging HTTP data is more straightforward, this function essentially acts as a middleware that reads Req and Res
-// and logs them.
-func ServeHTTP() {
-	logCat := log.New(os.Stdout, "[HTTP] ", log.Lmsgprefix|log.LstdFlags)
+func handleTCP(conn net.Conn, bufreader *bufio.Reader) {
+	logCat := fLogger()
 
-	var err error
-	HTTPListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", config.HTTPPort))
+	start := time.Now()
+	
+	logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
+
+	port, destAddr, err := getOriginalDst(conn.(*net.TCPConn))
 	if err != nil {
-		log.Fatalf("Error listening on %d - %v\n", config.HTTPPort, err)
+		logCat.Printf("Error getOriginalDst: ", err)
+		return
 	}
 
-	logCat.Printf("HTTP Server listening on %d\n", config.HTTPPort)
-
-	for {
-		logCat.Println("Waiting for HTTP Connections")
-		conn, err := HTTPListener.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
-			}
-
-			logCat.Printf("Error accepting HTTP connection: %v\n", err)
-			continue
-		}
-
-		go func(conn net.Conn) {
-			defer conn.Close()
-
-			logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
-
-			start := time.Now()
-
-			// Read the request sent by the client.
-			bufreader := bufio.NewReader(conn)
-			req, err := http.ReadRequest(bufreader)
-			if err != nil {
-				logCat.Printf("bad http req: %v\n", err)
-				return
-			}
-
-			logCat.Printf("Request: %s %s%s", req.Method, req.Host, req.URL)
-
-			// Connect to the originally intended target.
-			destAddr := fmt.Sprintf("%s:%d", req.Host, 80)
-			dst, err := net.Dial("tcp", destAddr)
-			if err != nil {
-				logCat.Printf("dial error %v\n", err)
-				return
-			}
-
-			defer dst.Close()
-			// Send the originally intended request to the target.
-			if err := req.Write(dst); err != nil {
-				logCat.Printf("write error: %v\n", err)
-				return
-			}
-
-			// Read the response received from the target.
-			resp, err := http.ReadResponse(bufio.NewReader(dst), req)
-			if err != nil {
-				logCat.Printf("read error: %v\n", err)
-				return
-			}
-
-			// Log response hash/size/etc.
-			fullyQualName := fmt.Sprintf("http://%s", destAddr)
-			rec, err := networklog.BuildNetworkRecord(req, resp, start, time.Now(), conn.RemoteAddr().String(), fullyQualName)
-
-			// Forward the response back to the original client.
-			if err := resp.Write(conn); err != nil {
-				logCat.Printf("failed to send to client: %v\n", err)
-				_ = resp.Body.Close()
-				return
-			}
-
-			logCat.Printf("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
-
-			_ = resp.Body.Close()
-
-			if err != nil {
-				logCat.Println("Build record failed")
-				return
-			}
-
-			// Save log to a log file.
-			err = networklog.AppendRecord(config.HTTPLog, rec)
-			if err != nil {
-				logCat.Println("Append record failed")
-				return
-			}
-		}(conn)
+	// Connect to original target.
+	dialAddr := fmt.Sprintf("%s:%d", destAddr, port)
+	dst, err := net.Dial("tcp", dialAddr)
+	if err != nil {
+		logCat.Printf("dial error %v\n", err)
+		return
 	}
+	defer dst.Close()
+
+	// Relay information between channels
+	done := make(chan struct{}, 2)
+
+	client := networklog.NewRawRecord(conn)
+	server := networklog.NewRawRecord(dst)
+
+	go func() {
+		_, _ = io.Copy(server, bufreader)
+		done <- struct{}{}
+	}()
+
+	go func() {
+		_, _ = io.Copy(client, server)
+		done <- struct{}{}
+	}()
+
+	<-done
+
+	logCat.Printf("Connection closed.\n")
+	
+	rec, _ := networklog.BuildRawRecord(client, server, start, time.Now(), conn.RemoteAddr().String(), dialAddr)
+	networklog.AppendRecord(config.Log, rec)
+}
+
+func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
+	logCat := fLogger()
+	logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
+
+	start := time.Now()
+
+	req, err := http.ReadRequest(bufreader)
+	if err != nil {
+		logCat.Printf("bad http req: %v\n", err)
+		return
+	}
+
+	logCat.Printf("Request: %s %s%s", req.Method, req.Host, req.URL)
+
+	port, _, err := getOriginalDst(conn.(*net.TCPConn))
+	if err != nil {
+		logCat.Printf("Error getOriginalDst: ", err)
+		return
+	}
+	logCat.Println("port", port)
+
+	// Connect to original target.
+
+	usePort := ":80"
+	
+	if strings.Contains(req.Host, ":") {
+		usePort = ""	
+	} 
+	
+	destAddr := fmt.Sprintf("%s%s", req.Host, usePort)
+	
+	dst, err := net.Dial("tcp", destAddr)
+	if err != nil {
+		logCat.Printf("dial error %v\n", err)
+		return
+	}
+
+	defer dst.Close()
+	// Send the originally intended request to the target.
+	if err := req.Write(dst); err != nil {
+		logCat.Printf("write error: %v\n", err)
+		return
+	}
+
+	// Read the response received from the target.
+	resp, err := http.ReadResponse(bufio.NewReader(dst), req)
+	if err != nil {
+		logCat.Printf("read error: %v\n", err)
+		return
+	}
+
+	// Log response hash/size/etc.
+	fullyQualName := fmt.Sprintf("http://%s", destAddr)
+	rec, err := networklog.BuildHTTPRecord(req, resp, start, time.Now(), conn.RemoteAddr().String(), fullyQualName, "HTTP")
+
+	// Forward the response back to the original client.
+	if err := resp.Write(conn); err != nil {
+		logCat.Printf("failed to send to client: %v\n", err)
+		_ = resp.Body.Close()
+		return
+	}
+
+	logCat.Printf("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
+
+	_ = resp.Body.Close()
+
+	if err != nil {
+		logCat.Println("Build record failed")
+		return
+	}
+
+	// Save log to a log file.
+	err = networklog.AppendRecord(config.Log, rec)
+	if err != nil {
+		logCat.Println("Append record failed")
+		return
+	}
+}
+
+func getOriginalDst(conn *net.TCPConn) (int, string, error) {
+//	logCat := fLogger()
+	file, err := conn.File()
+	if err != nil {
+		return -1, "", err
+	}
+
+	defer file.Close()
+	fd := int(file.Fd())
+
+	addr, err := unix.GetsockoptIPv6Mreq(int(fd), unix.SOL_IP, 80)
+	if err != nil {
+		return -1, "", err
+	}
+
+	server := fmt.Sprintf("%d.%d.%d.%d", 
+		addr.Multiaddr[4],
+		addr.Multiaddr[5],
+		addr.Multiaddr[6],
+		addr.Multiaddr[7],
+	)
+
+	return int(addr.Multiaddr[2]) << 8 | int(addr.Multiaddr[3]), server, nil
+}
+
+func handleTLS(c net.Conn, br *bufio.Reader) {
+	logCat := fLogger()
+	logCat.Println("Connection from: ", c.RemoteAddr())
+
+	// We read the TLS Hello message sent by the client to get information about
+	// the original intended target. Unlike HTTP this is not transparently available
+	// and needs some parsing on our end.
+	// conn, hello, err := tlsutils.PeekClientHello(c)
+	conn, hello, err := tlsutils.PeekClientHelloBufReader(c, br)
+	if err != nil {
+		logCat.Printf("Error peaking tls - %v\n", err)
+		return
+	}
+
+	port, _, err := getOriginalDst(c.(*net.TCPConn))
+	if err != nil {
+		logCat.Println("gOD: ", err)
+		return
+	}
+
+	host := hello.ServerName
+	if host == "" {
+		logCat.Println("Non SNI client")
+		return
+	}
+
+	// Create a custom CONNECT request to the original target, and then forward it to the client.
+	connectReq := &http.Request{
+		Method: "CONNECT",
+		URL: &url.URL{
+			Host: net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		},
+		Host:       net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		Header:     make(http.Header),
+		RemoteAddr: c.RemoteAddr().String(),
+	}
+
+	// This custom writer makes sure that we don't send a duplicate CONNECT response back to the client.
+	// It "eats" the CONNECT response.
+	ecrw := tlsutils.EatConnectResponseWriter{conn}
+	config.ProxyServer.ServeHTTP(ecrw, connectReq)
+}
+
+func getPeerCred(conn net.Conn) (*unix.Ucred, error) {
+	
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return nil, fmt.Errorf("Not a tcp conn")
+	}
+
+	file, err := tcpConn.File()
+	if err != nil {
+		return nil, err
+	}
+
+	defer file.Close()
+
+	cred, err := unix.GetsockoptUcred(int(file.Fd()), unix.SOL_SOCKET, unix.SO_PEERCRED)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return cred, nil
 }
