@@ -10,17 +10,19 @@ Proxies are transparent so programs don't need modifications as long as any traf
 
 Conversely, the proxy doesn't need any information about the processes either, they just take as input HTTP/TLS traffic and redirect it back to the calling process after logging.
 
+---
+
 ### Initial Configurations
 
-#### Build
+#### 0. Build
 
 `go build -o proxy -buildvcs=false main.go`
 
-#### Generate a certificate
+#### 1. Generate a certificate
 
 `./proxy --generate-ca`
 
-#### Trust this certificate on the client (example for Debian/Ubuntu) - 
+#### 2. Trust this certificate on the client (example for Debian/Ubuntu) - 
 
 ```
 cp /tmp/witproxca.crt /usr/local/share/ca-certificates/
@@ -31,11 +33,11 @@ If using a certificate that is already trusted by the client, skip `--generate-c
 
 `oss-rebuild` wraps individual package managers. It provides environment variables to ensure the package manager trusts the certificates it generates. (For e.g. `PIP_CERT` for `pip`, `CURL_CA_BUNDLE` for `curl` , `NODE_EXTRA_CA_CERTS` for `npm`). This removes the need for a globally trusted certificate on the client machine.
 
-#### Run proxy in the background
+#### 3. Run proxy in the background
 
 `./proxy`
 
-#### Redirect traffic to proxies
+#### 4. Redirect traffic to proxies
 
 If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80` traffic to `localhost:1233`. For custom ports, redirect `:443` traffic to `localhost:<tls-port>` and `:80` traffic to `localhost:<http-port>`.
 
