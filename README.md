@@ -1,4 +1,4 @@
-## Transparent TLS and HTTP Proxy
+## Transparent Network Proxy
 
 This repo provides a binary that runs transparent HTTP and TLS proxy servers that log request/response pairs to disk.
 
@@ -42,15 +42,14 @@ If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80
 Two simple ways to achieve these:
 
 - **iptables**
-
-    For linux systems, `iptables` can be used to [redirect traffic](https://linux.die.net/man/8/iptables#:~:text=raw%20table.-,REDIRECT,-This%20target%20is) that meets a certain set of requirements to a local port. In the example below we are redirecting all port `80` and `443` traffic from the user `builduser` to our proxies. 
+    
+    For linux systems, `iptables` can be used to [redireect traffic](https://linux.die.net/man/8/iptables#:~:text=raw%20table.-,REDIRECT,-This%20target%20is) that meets a certain set of requirements to a local port. In the example below we are redirecting all `tcp` traffic to the default port of our proxy `1230` from `builduser`. 
 
     ```
-    sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner --uid-owner builduser -j REDIRECT --to-ports 1233
-    sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner --uid-owner builduser -j REDIRECT --to-ports 1234
+    sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner builduser -j REDIRECT --to-ports 1230
     ```
-
-    If the `builduser` now runs a build command such as `npm install`, all traffic to the npm registry is now routed through our TLS proxy running on port 1234.
+    
+    The proxy detects whether the traffic is HTTP, TLS, or a raw socket, and logs the requests accordingly.
 
     `iptables` can also be used in several complex configurations depending on which traffic requires monitoring.
 
@@ -175,9 +174,7 @@ Command line flags for `./proxy`
 | -------- | ------------- | ----------- |
 | `--generate-ca` |  `false` | Generate a new TLS certificate and terminate early. | 
 | `--verbose` | `false` | Enable verbose logs for `goproxy` TLS server.|
-| `--tls-port` | `1234` | Configure the TLS Port on localhost | 
-| `--http-port` |  `1233` | Configure the HTTP Port on localhost | 
+| `--port` | `1230` | Configure the TCP Port on localhost | 
 | `--cert-path` | `/tmp/witproxca.crt` | TLS Certificate Path | 
 | `--key-path` | `/tmp/witproxkey.pem` | TLS Certificate Key Path | 
-| `--http-log` |  `/tmp/witprox.http.log` | Log file for HTTP requests | 
-| `--tls-log` | `/tmp/witprox.tls.log` | Log file for TLS requests |
+| `--log` |  `/tmp/witprox.log` | Log file for requests | 
