@@ -39,9 +39,9 @@ If using a certificate that is already trusted by the client, skip `--generate-c
 
 #### 4. Redirect traffic to proxies
 
-If using default ports, redirect all `:443` traffic to `localhost:1234` and `:80` traffic to `localhost:1233`. For custom ports, redirect `:443` traffic to `localhost:<tls-port>` and `:80` traffic to `localhost:<http-port>`.
+If using the default port, redirect all `tcp` traffic to `localhost:1230`. The proxy detects whether the traffic is HTTP, TLS, or a raw socket, and logs the requests accordingly.
 
-Two simple ways to achieve these:
+Two simple ways to achieve this:
 
 - **iptables**
     
@@ -49,9 +49,7 @@ Two simple ways to achieve these:
 
     ```
     sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner builduser -j REDIRECT --to-ports 1230
-    ```
-    
-    The proxy detects whether the traffic is HTTP, TLS, or a raw socket, and logs the requests accordingly.
+    ```    
 
     `iptables` can also be used in several complex configurations depending on which traffic requires monitoring.
 
