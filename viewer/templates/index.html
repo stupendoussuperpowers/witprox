@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live JSON Log Viewer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 0; padding: 1rem; background:#f6f7fb; }
+    header { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
+    h1 { margin:0; font-size:1.1rem; }
+    #container { display:flex; gap:1rem; }
+    #list { flex: 1 1 60%; max-width: 900px; }
+    .card { background: white; border-radius:8px; padding:0.75rem; margin-bottom:0.75rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+    .meta { display:flex; gap:1rem; align-items:center; font-size:0.9rem; color:#333; }
+    .proto { font-weight:600; padding:0.15rem 0.4rem; border-radius:4px; background:#eef2ff; color:#2a2a86; }
+    .ts { color:#666; font-size:0.85rem; }
+    .url { font-weight:600; margin-top:0.4rem; color:#1a0dab; word-break:break-all; }
+    .raw { margin-top:0.5rem; display:none; white-space:pre-wrap; font-family: monospace; font-size:0.85rem; background:#0f172a08; padding:0.5rem; border-radius:6px; }
+    .toggle { cursor:pointer; color:#2563eb; font-size:0.85rem; margin-left:auto; }
+    #stats { font-size:0.9rem; color:#444; }
+    #controls { margin-left:auto; display:flex; gap:0.5rem; align-items:center; }
+    .badge { background:#111827; color:white; padding:0.15rem 0.5rem; border-radius:6px; font-size:0.75rem; }
+    #filter { padding:0.4rem; border-radius:6px; border:1px solid #ddd; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Live JSON Log Viewer</h1>
+  <div id="controls">
+    <input id="filter" placeholder="filter (proto/url/client)"/>
+    <div id="stats" title="total messages">msgs: <span id="msgcount">0</span></div>
+  </div>
+</header>
+
+<div id="container">
+  <div id="list"></div>
+  <div style="width:320px;">
+    <div class="card">
+      <strong>Help</strong>
+      <p style="margin:.4rem 0 0 0; color:#555; font-size:0.9rem">
+        This page listens to the log file and shows each JSON record as a compact card.
+        Click <em>Show raw</em> to view the full record. Filter text filters cards.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const es = new EventSource("/events");
+  const list = document.getElementById("list");
+  const msgcountEl = document.getElementById("msgcount");
+  const filterInput = document.getElementById("filter");
+  let count = 0;
+  let cards = [];
+
+  function renderCard(obj) {
+    const proto = obj.protocol || (obj.req_body && "HTTP/UNKNOWN") || "UDP/TCP";
+    const ts = obj.timestamp || new Date().toISOString();
+    const who = obj.client_addr || obj.client || "";
+    const url = obj.url || obj.dst_addr || obj.resp_to || "";
+
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.text = (proto + " " + ts + " " + who + " " + url).toLowerCase();
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+
+    const protoEl = document.createElement("div");
+    protoEl.className = "proto";
+    protoEl.textContent = proto;
+
+    const tsEl = document.createElement("div");
+    tsEl.className = "ts";
+    tsEl.textContent = ts;
+
+    const whoEl = document.createElement("div");
+    whoEl.className = "ts";
+    whoEl.textContent = who;
+
+    const toggle = document.createElement("div");
+    toggle.className = "toggle";
+    toggle.textContent = "Show raw";
+    toggle.onclick = () => {
+      raw.style.display = raw.style.display === "none" ? "block" : "none";
+      toggle.textContent = raw.style.display === "none" ? "Show raw" : "Hide raw";
+    };
+
+    meta.appendChild(protoEl);
+    meta.appendChild(tsEl);
+    meta.appendChild(whoEl);
+    meta.appendChild(toggle);
+
+    const urlEl = document.createElement("div");
+    urlEl.className = "url";
+    urlEl.textContent = url;
+
+    const raw = document.createElement("pre");
+    raw.className = "raw";
+    raw.textContent = JSON.stringify(obj, null, 2);
+
+    card.appendChild(meta);
+    card.appendChild(urlEl);
+    card.appendChild(raw);
+
+    // prepend so newest are at top
+    list.insertBefore(card, list.firstChild);
+    cards.unshift(card);
+
+    // trim UI to last 1000 items
+    if (cards.length > 1000) {
+      const rem = cards.splice(1000);
+      rem.forEach(c => c.remove());
+    }
+
+    count++;
+    msgcountEl.textContent = count;
+  }
+
+  es.onmessage = (ev) => {
+    try {
+      const obj = JSON.parse(ev.data);
+      // basic mapping: some logs use req_body/res_body etc.
+      renderCard(obj);
+      applyFilter(); // ensure new card respects filter
+    } catch(e) {
+      console.warn("bad json", e);
+    }
+  };
+
+  es.onerror = (err) => {
+    console.error("SSE error", err);
+    // try to reconnect or show UI hint
+  };
+
+  function applyFilter() {
+    const q = filterInput.value.trim().toLowerCase();
+    if (!q) {
+      cards.forEach(c => c.style.display = "block");
+      return;
+    }
+    cards.forEach(c => {
+      const s = c.dataset.text;
+      c.style.display = s.includes(q) ? "block" : "none";
+    });
+  }
+
+  filterInput.addEventListener("input", () => applyFilter());
+})();
+</script>
+</body>
+</html>
+
