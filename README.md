@@ -86,95 +86,122 @@ The current setup relies on `TPROXY` rules in `iptables`, which mark and redirec
 ---
 ### Sample Logs
 
-By default the logs are stored in `/tmp/witprox.tls.log` and `/tmp/witprox.http.log`
+By default all logs are stored in `/tmp/witprox.log` for both TCP and UDP traffic.
 
 Each HTTP(S) Request/Response pair is stored as JSON in these log files as a newline, which can be later inspected using tools such as `jq`. 
 
 Example log from running `npm install is-even` - 
 
 ```
-$> tail /tmp/witprox.tls.log | jq
+{
+  "protocol": "UDP",
+  "client_addr": "172.17.0.2:57662",
+  "dest_addr": "192.168.65.7:53",
+  "hash": "0ab1c7036bb37542668698902eeed62ea75bd372b4f13a267bfeccfac7679f97",
+  "timestamp": "2025-09-24T06:27:04.077426587Z",
+  "type": "DNS",
+  "body": {
+    "ID": 29007,
+    "is_query": true,
+    "op_code": 0,
+    "r_code": 0,
+    "qd_count": 1,
+    "an_count": 0,
+    "ns_count": 0,
+    "ar_count": 0,
+    "question": "registry.npmjs.org.",
+    "q_type": 1,
+    "q_class": 1
+  }
+}
+
+...
 
 {
-  "timestamp": "2025-09-14T03:19:56.357272801Z",
-  "duration_ms": 9223372036854,
+  "protocol": "TCP",
+  "timestamp": "2025-09-24T06:27:04.506685254Z",
+  "duration_ms": 124,
+  "url": "https://registry.npmjs.org:443/is-odd/-/is-odd-3.0.1.tgz",
+  "client_addr": "172.17.0.2:42102",
   "method": "GET",
-  "url": "https://registry.npmjs.org:443/is-even/-/is-even-1.0.0.tgz",
   "status_code": 200,
-  "client_addr": "127.0.0.1:58566",
-  "bytes_sent": 0,
-  "bytes_recv": 2163,
-  "req_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "res_hash": "d77c6aeabdfb84feed20106b7533975fe68d17d1fa7969672ddf8efb2c37b60c",
-  "req_headers": {
-    "Accept": [
-      "*/*"
-    ],
-    "Npm-Command": [
-      "install"
-    ],
-    "Pacote-Integrity": [
-      "sha512-LEhnkAdJqic4Dbqn58A0y52IXoHWlsueqQkKfMfdEnIYG8A1sm/GHidKkS6yvXlMoRrkM34csHnXQtOqcb+Jzg=="
-    ],
-    "Pacote-Pkg-Id": [
-      "remote:is-even@https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz"
-    ],
-    "Pacote-Req-Type": [
-      "tarball"
-    ],
-    "Pacote-Version": [
-      "12.0.3"
-    ],
-    "User-Agent": [
-      "npm/8.5.1 node/v12.22.9 linux x64 workspaces/false"
-    ]
+  "req_body": {
+    "headers": {
+      "Accept": [
+        "*/*"
+      ],
+      "Npm-Command": [
+        "install"
+      ],
+      "Pacote-Integrity": [
+        "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA=="
+      ],
+      "Pacote-Pkg-Id": [
+        "remote:is-odd@https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"
+      ],
+      "Pacote-Req-Type": [
+        "tarball"
+      ],
+      "Pacote-Version": [
+        "12.0.3"
+      ],
+      "User-Agent": [
+        "npm/8.5.1 node/v12.22.9 linux x64 workspaces/false"
+      ]
+    },
+    "bytes": 0,
+    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
-  "res_headers": {
-    "Accept-Ranges": [
-      "bytes"
-    ],
-    "Access-Control-Allow-Origin": [
-      "*"
-    ],
-    "Age": [
-      "213429"
-    ],
-    "Cache-Control": [
-      "public, immutable, max-age=31557600"
-    ],
-    "Cf-Cache-Status": [
-      "HIT"
-    ],
-    "Cf-Ray": [
-      "97ecbee10b1a41ef-EWR"
-    ],
-    "Connection": [
-      "keep-alive"
-    ],
-    "Content-Length": [
-      "2163"
-    ],
-    "Content-Type": [
-      "application/octet-stream"
-    ],
-    "Date": [
-      "Sun, 14 Sep 2025 03:19:56 GMT"
-    ],
-    "Etag": [
-      "\"009dcdfe3ddfc69d386f7abb26fe6d0c\""
-    ],
-    "Last-Modified": [
-      "Sun, 27 May 2018 04:58:57 GMT"
-    ],
-    "Server": [
-      "cloudflare"
-    ],
-    "Set-Cookie": [
-      "_cfuvid=y8BEf03ZeLcLCE4LHR.R9s7eQM_POnNUB_BAex_jmpI-1757819996378-0.0.1.1-604800000; path=/; domain=.npmjs.org; HttpOnly; Secure; SameSite=None"
-    ],
-    "Vary": [
-      "Accept-Encoding"
-    ]
+  "res_body": {
+    "headers": {
+      "Accept-Ranges": [
+        "bytes"
+      ],
+      "Access-Control-Allow-Origin": [
+        "*"
+      ],
+      "Age": [
+        "1831561"
+      ],
+      "Cache-Control": [
+        "public, immutable, max-age=31557600"
+      ],
+      "Cf-Cache-Status": [
+        "HIT"
+      ],
+      "Cf-Ray": [
+        "984036c19f2f4a5f-EWR"
+      ],
+      "Connection": [
+        "keep-alive"
+      ],
+      "Content-Length": [
+        "2774"
+      ],
+      "Content-Type": [
+        "application/octet-stream"
+      ],
+      "Date": [
+        "Wed, 24 Sep 2025 06:27:04 GMT"
+      ],
+      "Etag": [
+        "\"72202ddfef0f4a837b5483dfefaf662d\""
+      ],
+      "Last-Modified": [
+        "Thu, 31 May 2018 20:16:49 GMT"
+      ],
+      "Server": [
+        "cloudflare"
+      ],
+      "Set-Cookie": [
+        "_cfuvid=YgEXbxYWa2hL_eHtcjsyJxh6g5AIuSIDiciHiDoTb6A-1758695224594-0.0.1.1-604800000; path=/; domain=.npmjs.org; HttpOnly; Secure; SameSite=None"
+      ],
+      "Vary": [
+        "Accept-Encoding"
+      ]
+    },
+    "bytes": 2774,
+    "hash": "13c23b3f1f3a5c146b8906e23c8e674f8e4a6ff44b77720e1d4bddb7b2caf312"
   }
 }
 ```
