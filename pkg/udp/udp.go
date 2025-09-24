@@ -1,18 +1,13 @@
 package udp
 
 import (
-	"net"
-	//"bufio"
-	"log"
-	"fmt"
-	//"io"
-	//"bytes"
-	"unsafe"
 	"encoding/binary"
+	"fmt"
+	"log"
+	"net"
 	"os"
-	//"sync"
 	"time"
-	//"strings"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -148,14 +143,14 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 		return
 	}
 	defer serverConn.Close()
-	
+
 	// Send data to server
 	_, err = serverConn.Write(data)
 	if err != nil {
 		log.Printf("Failed to write to server: %v\n", err)
 		return
 	}
-	
+
 	// Read response from server with timeout
 	serverConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 4096)
@@ -164,13 +159,13 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 		log.Printf("Failed to read from server: %v\n", err)
 		return
 	}
-	
+
 	// Log received data from server
-	
+
 	dstRawUDP := networklog.BuildUDPRecord(buf[:responseLen], origDst.String(), clientAddr.String(), proto)
- 
+
 	networklog.AppendRecord(app.Config.Log, dstRawUDP)
-	
+
 	err = sendUDPResponse(buf[:responseLen], origDst, clientAddr)
 
 	if err != nil {
