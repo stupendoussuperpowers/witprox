@@ -62,7 +62,7 @@ def index():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live JSON log viewer (SSE)")
-    parser.add_argument("--file", "-f", default="records.log",
+    parser.add_argument("--file", "-f", default="witprox.log",
                         help="newline JSON log file")
     parser.add_argument("--host", default="0.0.0.0", help="host to bind")
     parser.add_argument("--port", "-p", type=int,
