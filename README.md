@@ -18,6 +18,8 @@ Conversely, the proxy doesn't need any information about the processes either, t
 
 `go build -o proxy -buildvcs=false main.go`
 
+[TLS, TCP]
+
 #### 1. Generate a certificate
 
 `./proxy --generate-ca`
@@ -68,7 +70,19 @@ Two simple ways to achieve this:
     `LD_PRELOAD=/path/to/connectldp.so npm install --prefer-online`
 
     This approach is much more limited, given that all programs to be monitored need to be LD_PRELOAD'd individually. It's also much harder to describe filters.
-  
+
+[UDP]
+
+UDP proxy works by binding our UDP server to `0.0.0.0` with `IP_TRANSPARENT` and `IP_RECVORGDSTADDR` flags on the socket. These socket options allow the kernel to preserve the original destination address of incoming packets which are later extracted from the out-of-band data associated with that packet.
+
+Unlike TCP, UDP is connectionless, this introduces a few challenges:
+
+- Each packet needs to be handled individually, and we must ensure that the server responses we relay back to client appear to come from the original destination (IP, Port). This requires us to spoof our address while sending this message back to the client. 
+
+- With TCP, we need no setup to determine the original IP address, we can achieve that by getting the `SO_ORIGINAL_DST` socket option on the connection. This approach does not work on UDP out of the box, and we need to use the `IP_RECVORIGDSTADDR` flag to ensure this data is stored in the out-of-band data of the packet.
+
+The current setup relies on `TPROXY` rules in `iptables`, which mark and redirect the relevant UDP traffic to our proxy. These rules can be found in `setup_udp_proxy.sh`. 
+
 ---
 ### Sample Logs
 
@@ -174,7 +188,8 @@ Command line flags for `./proxy`
 | -------- | ------------- | ----------- |
 | `--generate-ca` |  `false` | Generate a new TLS certificate and terminate early. | 
 | `--verbose` | `false` | Enable verbose logs for `goproxy` TLS server.|
-| `--port` | `1230` | Configure the TCP Port on localhost | 
+| `--tcp-port` | `1230` | Configure the TCP Port on localhost | 
+| `--udp-port` | `2230` | Configure the UDP Port on localhost | 
 | `--cert-path` | `/tmp/witproxca.crt` | TLS Certificate Path | 
 | `--key-path` | `/tmp/witproxkey.pem` | TLS Certificate Key Path | 
 | `--log` |  `/tmp/witprox.log` | Log file for requests | 
