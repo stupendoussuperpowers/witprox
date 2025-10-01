@@ -1,0 +1,14 @@
+Python:
+[x] https://github.com/ijl/orjson
+[ ] https://github.com/MagicStack/uvloop
+Rust:
+[x] https://github.com/sharkdp/hexyl
+[x] https://github.com/sharkdp/hyperfine
+[x] https://github.com/svenstaro/miniserve
+Golang:
+[x] https://github.com/rakyll/hey
+[x] https://github.com/charmbracelet/glow
+[ ] https://github.com/krishpranav/gotop
+Java:
+[ ] https://github.com/jopt-simple/jopt-simple?tab=readme-ov-file
+[ ] https://github.com/jhy/jsoup
