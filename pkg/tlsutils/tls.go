@@ -60,6 +60,7 @@ func (tc EatConnectResponseWriter) Header() http.Header {
 }
 
 func (tc EatConnectResponseWriter) Write(buf []byte) (int, error) {
+	// Only eat the CONNECT response, let everything else through
 	if bytes.Equal(buf, []byte("HTTP/1.0 200 OK\r\n\r\n")) {
 		return len(buf), nil // ignore the HTTP OK response Write() from the CONNECT request
 	}
@@ -71,7 +72,8 @@ func (tc EatConnectResponseWriter) WriteHeader(code int) {
 }
 
 func (tc EatConnectResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return tc, bufio.NewReadWriter(bufio.NewReader(tc), bufio.NewWriter(tc)), nil
+	// Return the underlying connection for hijacking
+	return tc.Conn, bufio.NewReadWriter(bufio.NewReader(tc.Conn), bufio.NewWriter(tc.Conn)), nil
 }
 
 const (
