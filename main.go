@@ -7,14 +7,19 @@ import (
 	"log"
 
 	"os"
-	"syscall"
+	"os/exec"
 	"os/signal"
+	"syscall"
 
+	"github.com/cilium/ebpf/link"
+
+	"github.com/stupendoussuperpowers/witprox/pkg/app"
 	"github.com/stupendoussuperpowers/witprox/pkg/certificates"
 	"github.com/stupendoussuperpowers/witprox/pkg/tcp"
 	"github.com/stupendoussuperpowers/witprox/pkg/udp"
-	"github.com/stupendoussuperpowers/witprox/pkg/app"
 )
+
+var activeLinks []link.Link
 
 func main() {
 	// This flag is used if we need to generate a fresh TLS certificate. More details are documented below.
@@ -26,16 +31,18 @@ func main() {
 	flagVerbose := flag.Bool("verbose", false, "Goproxy verbose logs")
 	flagPort := flag.Int("port", 1230, "Start TCP listener on this port")
 	flagUDPPort := flag.Int("udp-port", 2230, "Start UDP listener on this port")
+	flagSetup := flag.Bool("setup", false, "Setup eBPF")
+	flagServers := flag.Bool("servers", false, "Only run the servers, without any eBPF setups.")
 
 	flag.Parse()
 
 	app.Config = app.WitproxConfig{
 		TCPPort: *flagPort,
 		UDPPort: *flagUDPPort,
-		CaPath:   *flagCaPath,
-		KeyPath:  *flagKeyPath,
-		Log: *flagLog,
-		Verbose:  *flagVerbose,
+		CaPath:  *flagCaPath,
+		KeyPath: *flagKeyPath,
+		Log:     *flagLog,
+		Verbose: *flagVerbose,
 	}
 
 	// The workflow is to try to load the certificate stored at config.CaPath and the key at config.KeyPath.
@@ -75,16 +82,53 @@ func main() {
 		log.Printf("Loaded certificate at %s\n", app.Config.CaPath)
 	}
 
-	tcp.SetupTLS(ca)
+	if *flagSetup {
+		activeLinks = SetupEBPF()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	go tcp.ServeTCP()
-	go udp.ServeUDP()
-	<-ctx.Done()
+		cmd := exec.Command(os.Args[0], "-servers")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 
-	stop()
+		log.Printf("Starting only servers\n")
+		if err := cmd.Start(); err != nil {
+			log.Fatalf("failed to start servers: %v", err)
+		}
 
-	app.TCPListener.Close()
+		pid := cmd.Process.Pid
+		log.Printf("Moving PID to cgroup: %d\n", pid)
+		moveToCgroup(pid, "/sys/fs/cgroup/witprox")
 
-	log.Println("Shutting down proxy server")
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+		go func() {
+			sig := <-sigChan
+			log.Printf("Received SIG %s, forwarding to child\n", sig)
+			_ = cmd.Process.Signal(sig)
+		}()
+
+		var wstatus syscall.WaitStatus
+		var rusage syscall.Rusage
+
+		wpid, err := syscall.Wait4(pid, &wstatus, 0, &rusage)
+		if err != nil {
+			log.Fatalf("wait4: %v", err)
+		}
+		log.Printf("wait4: PID: %d\n", wpid)
+
+		CleanUpEBPF()
+	}
+
+	if *flagServers {
+		tcp.SetupTLS(ca)
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		go tcp.ServeTCP()
+		go udp.ServeUDP()
+		<-ctx.Done()
+
+		stop()
+		log.Println("Shutting down proxy server")
+		app.TCPListener.Close()
+	}
 }
