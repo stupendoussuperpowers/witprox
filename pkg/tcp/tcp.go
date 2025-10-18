@@ -11,9 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,13 +42,17 @@ type ConnInfo struct {
 
 var connInfoMap sync.Map
 
+var logger = app.GetLogger("TCP")
+
 func ServeTCP() {
 	var err error
 	app.TCPListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", app.Config.TCPPort))
 
 	if err != nil {
-		log.Printf("Error listening on port 1230\n")
+		logger.Infof("Error listening on port %d\n", app.Config.TCPPort)
 		return
+	} else {
+		logger.Infof("TCP server listening on: %d\n", app.Config.TCPPort)
 	}
 
 	for {
@@ -59,18 +61,17 @@ func ServeTCP() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Fatalf("Error listening on 1230\n")
+			log.Fatalf("TCPListener.Accept() error: %v\n", err)
 		}
 
 		go func(c net.Conn) {
 			proto, br, err := detectProtocol(c)
 			if err != nil {
-				log.Println("Error in detect Protocol:", err)
+				logger.Info("Error in detect Protocol:", err)
 				c.Close()
 				return
 			}
 
-			log.Println("Proto: ", proto)
 			switch proto {
 			case "http":
 				handleHTTP(c, br)
@@ -92,36 +93,32 @@ func SetupTLS(ca *tls.Certificate) {
 	// Tag requests before sending it to the server so that we can use it to store custom metrics. (Start time in
 	// this case).
 	app.Config.ProxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		logCat := fLogger()
-		logCat.Printf("Request: %s %s\n", req.Method, req.URL)
+		logger.Infof("Request: %s %s\n", req.Method, req.URL)
 
 		id := uuid.NewString()
 		req.Header.Set(proxyIDHeader, id)
-		startTimes.Store(id, time.Now().UTC())
+		startTimes.Store(id, time.Now())
 
 		return req, nil
 	})
 
 	app.Config.ProxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		logCat := fLogger()
-		logCat.Printf("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
+		logger.Infof("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
 
 		var PID uint32
 		var origDst string
 		var origDstPort uint32
 		if v, ok := connInfoMap.Load(res.Request.RemoteAddr); ok {
-			logCat.Printf("v: %v\n", v)
 			origInfo := v.(string)
-			logCat.Printf("origInfo: %s", origInfo)
 			fmt.Sscanf(origInfo, "%s %d %d", &origDst, &origDstPort, &PID)
 		} else {
-			logCat.Printf("Unable to read connInfoMap")
+			logger.Infof("Unable to read connInfoMap")
 		}
 
-		logCat.Printf("Process %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
+		logger.Infof("PID %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
 
 		// Use the earlier used tag to retrieve custom logging metrics, and then delete this tag before it gets
-		// stored in the log.
+		// stored in the logger.
 		var id string
 		if res != nil && res.Request != nil {
 			id = res.Request.Header.Get(proxyIDHeader)
@@ -148,11 +145,11 @@ func SetupTLS(ca *tls.Certificate) {
 			clientAddr = res.Request.RemoteAddr
 		}
 
-		rec, _ := networklog.BuildTCPRecord(res.Request, res, start, time.Now(), res.Request.URL.String(), clientAddr, "http")
+		rec, _ := networklog.BuildTCPRecord(res.Request, res, start, time.Now(), res.Request.URL.String(), clientAddr, "tls")
 
-		err := networklog.AppendRecord(fmt.Sprintf("/tmp/tls.%d", PID), rec)
+		err := networklog.AppendRecord(fmt.Sprintf("/tmp/tls.%d", PID), *rec)
 		if err != nil {
-			log.Println("Append record failed")
+			logger.Info("Append record failed")
 			return res
 		}
 
@@ -187,7 +184,7 @@ func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
 	// Peek at the first 24 bytes (enough for TLS, HTTP, HTTP/2 detection)
 	header, err := br.Peek(24)
 	if err != nil && err != bufio.ErrBufferFull {
-		log.Println("Error!", err)
+		logger.Info("Error!", err)
 		return "", nil, err
 	}
 
@@ -219,29 +216,14 @@ func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
 	return "unknown", br, nil
 }
 
-func fLogger() *log.Logger {
-	pc, _, _, ok := runtime.Caller(1)
-	prefix := ""
-	if ok {
-		fn := runtime.FuncForPC(pc)
-		if fn != nil {
-			prefix = fmt.Sprintf("[%s] ", fn.Name())
-		}
-	}
-
-	return log.New(os.Stdout, prefix, log.LstdFlags|log.Lmsgprefix)
-}
-
 func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
-	logCat := fLogger()
-
 	start := time.Now()
 
-	logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
+	logger.Infof("Connection from: %v\n", conn.RemoteAddr())
 
 	destAddr, port, _, err := getConnInfo(conn)
 	if err != nil {
-		logCat.Printf("Error getting original destination: %w\n", err)
+		logger.Infof("Error getting original destination: %w\n", err)
 		return
 	}
 
@@ -249,7 +231,7 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 	dialAddr := fmt.Sprintf("%s:%d", destAddr, port)
 	dst, err := net.Dial("tcp", dialAddr)
 	if err != nil {
-		logCat.Printf("dial error %v\n", err)
+		logger.Infof("dial error %v\n", err)
 		return
 	}
 	defer dst.Close()
@@ -272,91 +254,89 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 
 	<-done
 
-	logCat.Printf("Connection closed.\n")
+	logger.Infof("Connection closed.\n")
 
 	rec, _ := networklog.BuildTCPRecord(client, server, start, time.Now(), dialAddr, conn.RemoteAddr().String(), "Unknown")
 
-	networklog.AppendRecord(app.Config.Log, rec)
+	networklog.AppendRecord(app.Config.Log, *rec)
 }
 
 func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
-	logCat := fLogger()
-	logCat.Printf("Connection from: %v\n", conn.RemoteAddr())
+	logger.Infof("Connection from: %v\n", conn.RemoteAddr())
 
 	start := time.Now()
 
 	req, err := http.ReadRequest(bufreader)
 	if err != nil {
-		logCat.Printf("bad http req: %v\n", err)
+		logger.Infof("bad http req: %v\n", err)
 		return
 	}
 
-	logCat.Printf("Request: %s %s%s", req.Method, req.Host, req.URL)
+	logger.Infof("Request: %s %s%s", req.Method, req.Host, req.URL)
 
-	// port, _, err := getOriginalDst(conn.(*net.TCPConn))
 	_, port, _, err := getConnInfo(conn)
 	if err != nil {
-		logCat.Printf("Error getOriginalDst: ", err)
+		logger.Infof("Error getOriginalDst: ", err)
 		return
 	}
 
-	log.Printf("port: %d\n", port)
+	logger.Infof("port: %d\n", port)
 	// Connect to original target.
 
-	usePort := ":80"
-	if strings.Contains(req.Host, ":") {
-		usePort = ""
-	}
+	// usePort := ":80"
+	// if strings.Contains(req.Host, ":") {
+	// 	usePort = ""
+	// }
 
-	destAddr := fmt.Sprintf("%s%s", req.Host, usePort)
+	destIP := networklog.IPAddr{Host: req.Host, Port: int(port)}
 
-	dst, err := net.Dial("tcp", destAddr)
+	dst, err := net.Dial("tcp", destIP.String())
 	if err != nil {
-		logCat.Printf("dial error %v\n", err)
+		logger.Infof("dial error %v\n", err)
 		return
 	}
 
 	defer dst.Close()
 	// Send the originally intended request to the target.
 	if err := req.Write(dst); err != nil {
-		logCat.Printf("write error: %v\n", err)
+		logger.Infof("write error: %v\n", err)
 		return
 	}
 
 	// Read the response received from the target.
 	resp, err := http.ReadResponse(bufio.NewReader(dst), req)
 	if err != nil {
-		logCat.Printf("read error: %v\n", err)
+		logger.Infof("read error: %v\n", err)
 		return
 	}
 
 	// Log response hash/size/etc.
-	fullyQualName := fmt.Sprintf("http://%s", destAddr)
+	fullyQualName := fmt.Sprintf("http://%s", destIP.String())
 
 	// Forward the response back to the original client.
 	if err := resp.Write(conn); err != nil {
-		logCat.Printf("failed to send to client: %v\n", err)
+		logger.Infof("failed to send to client: %v\n", err)
 		_ = resp.Body.Close()
 		return
 	}
 
-	logCat.Printf("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
+	logger.Infof("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
 
 	_ = resp.Body.Close()
 
 	if err != nil {
-		logCat.Println("Build record failed")
+		logger.Info("Build record failed")
 		return
 	}
 
 	rec, _ := networklog.BuildTCPRecord(req, resp, start, time.Now(), fullyQualName, conn.RemoteAddr().String(), "http")
 
-	log.Printf("HTTP Rec: %v\n", rec)
+	logger.Infof("HTTP Rec: %v\n", rec)
 
 	// Save log to a log file.
-	err = networklog.AppendRecord(app.Config.Log, rec)
+	err = networklog.AppendRecord(app.Config.Log, *rec)
 	if err != nil {
-		logCat.Println("Append record failed")
+		logger.Info("Append record failed")
 		return
 	}
 }
@@ -367,7 +347,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 	// First, get the socket cookie.
 	rawConn, err := tcpConn.SyscallConn()
 	if err != nil {
-		log.Println("Failed to get raw conn")
+		logger.Info("Failed to get raw conn")
 		return nil, 0, 0, fmt.Errorf("failed to get raw conn")
 	}
 
@@ -407,7 +387,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 	// Use cookie to get info about the original connection. This runs POST eBPF builds the maps
 	connMap, err := ebpf.LoadPinnedMap("/sys/fs/bpf/server_map", nil)
 	if err != nil {
-		log.Println("Failed to load connmap %w\n", err)
+		logger.Info("Failed to load connmap %w\n", err)
 	}
 	defer connMap.Close()
 
@@ -427,8 +407,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 }
 
 func handleTLS(c net.Conn, br *bufio.Reader) {
-	logCat := fLogger()
-	logCat.Println("Connection from: ", c.RemoteAddr())
+	logger.Info("[TLS] Connection from: ", c.RemoteAddr())
 
 	// We read the TLS Hello message sent by the client to get information about
 	// the original intended target. Unlike HTTP this is not transparently available
@@ -436,18 +415,18 @@ func handleTLS(c net.Conn, br *bufio.Reader) {
 	// conn, hello, err := tlsutils.PeekClientHello(c)
 	conn, hello, err := tlsutils.PeekClientHelloBufReader(c, br)
 	if err != nil {
-		logCat.Printf("Error peaking tls - %v\n", err)
+		logger.Infof("Error peaking tls - %v\n", err)
 		return
 	}
 
 	origDst, origPort, origPID, err := getConnInfo(c)
 	if err != nil {
-		log.Println("getConnInfo Failed: ", err)
+		logger.Info("getConnInfo Failed: ", err)
 	}
 
 	host := hello.ServerName
 	if host == "" {
-		logCat.Println("Non SNI client")
+		logger.Info("Non SNI client")
 		return
 	}
 

@@ -1,76 +1,51 @@
-package app 
+package app
 
 import (
-	"net"
 	"fmt"
-	// "syscall"
-	// "log"
-	"golang.org/x/sys/unix"
 	"github.com/elazarl/goproxy"
+	"net"
 )
 
 type WitproxConfig struct {
-	TCPPort int
-	UDPPort int
-	CaPath   string
-	KeyPath  string
-	Log   string
-	Verbose  bool
+	TCPPort     int
+	UDPPort     int
+	CaPath      string
+	KeyPath     string
+	Log         string
+	Verbose     bool
 	ProxyServer *goproxy.ProxyHttpServer
 }
 
-const proxyIDHeader = "X-Proxy-Req-Id"
-
 var (
-	TCPListener  net.Listener
-	UDPListener	*net.UDPConn
-	Config       WitproxConfig
+	TCPListener net.Listener
+	UDPListener *net.UDPConn
+	Config      WitproxConfig
 )
 
-func GetOriginalDst(conn *net.TCPConn) (int, string, error) {
-	file, err := conn.File()
-	if err != nil {
-		return -1, "", err
-	}
-
-	defer file.Close()
-	fd := int(file.Fd())
-
-	addr, err := unix.GetsockoptIPv6Mreq(int(fd), unix.SOL_IP, 80)
-	if err != nil {
-		return -1, "", err
-	}
-
-	server := fmt.Sprintf("%d.%d.%d.%d", 
-		addr.Multiaddr[4],
-		addr.Multiaddr[5],
-		addr.Multiaddr[6],
-		addr.Multiaddr[7],
-	)
-
-	return int(addr.Multiaddr[2]) << 8 | int(addr.Multiaddr[3]), server, nil
+type Logger struct {
+	Context string
 }
 
-func GetOriginalDstUDP(conn *net.UDPConn) (int, string, error) {
-	file, err := conn.File()
-	if err != nil {
-		return -1, "", err
-	}
+func (l Logger) Infof(format string, args ...any) {
+	pre := fmt.Sprintf("[INFO] %s\t", l.Context)
+	fmt.Printf(pre+format, args...)
+}
 
-	defer file.Close()
-	fd := int(file.Fd())
+func (l Logger) Info(format string, args ...any) {
+	pre := fmt.Sprintf("[INFO] %s\t", l.Context)
+	fmt.Println(append([]interface{}{pre}, args...)...)
+}
 
-	addr, err := unix.GetsockoptIPv6Mreq(int(fd), unix.SOL_IP, 80)
-	if err != nil {
-		return -1, "", err
-	}
+func (l Logger) Errorf(format string, args ...any) {
+	pre := fmt.Sprintf("[ERROR] %s\t", l.Context)
+	fmt.Printf(pre+format, args...)
+}
 
-	server := fmt.Sprintf("%d.%d.%d.%d", 
-		addr.Multiaddr[4],
-		addr.Multiaddr[5],
-		addr.Multiaddr[6],
-		addr.Multiaddr[7],
-	)
+func (l Logger) Error(format string, args ...any) {
+	pre := fmt.Sprintf("[Error] %s\t", l.Context)
+	fmt.Println(append([]interface{}{pre}, args...)...)
+}
 
-	return int(addr.Multiaddr[2]) << 8 | int(addr.Multiaddr[3]), server, nil
+func GetLogger(context string) *Logger {
+	return &Logger{Context: context}
 }

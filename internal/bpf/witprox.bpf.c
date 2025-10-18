@@ -74,11 +74,16 @@ int track_conn(struct bpf_sock_ops *skops) {
 			bpf_printk("passive_est: no info");
 			return 0;
 		}
-
-		bpf_map_update_elem(&server_map, &server_cookie, info, BPF_ANY);
-
-		bpf_map_delete_elem(&client_map, client_cookie);
-		bpf_map_delete_elem(&t_2_c, &tuple);
+		bpf_printk("info %d %d %d", info->pid, info->o_dst_ip, info->o_dst_port);
+		bpf_printk("Let's see if we hit this?");
+		int ret = bpf_map_update_elem(&server_map, &server_cookie, info, BPF_ANY);
+		if (ret) 
+			bpf_printk("update server_map failed: %d\n", ret);
+		bpf_printk("updated server_map");
+//		bpf_map_delete_elem(&client_map, client_cookie);
+		bpf_printk("cleaned client_map");
+//		bpf_map_delete_elem(&t_2_c, &tuple);
+		bpf_printk("cleaned t_2_c");
 	}
 
 	return 0;

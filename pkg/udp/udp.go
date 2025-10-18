@@ -132,7 +132,7 @@ func detectProtocol(payload []byte) string {
 func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *net.UDPAddr, data []byte, proto string) {
 	clientUDPMessage := networklog.BuildUDPRecord(data, clientAddr.String(), origDst.String(), proto)
 
-	networklog.AppendRecord(app.Config.Log, clientUDPMessage)
+	networklog.AppendRecord(app.Config.Log, *clientUDPMessage)
 
 	// For UDP, handle each packet individually (stateless)
 	// Create a temporary connection to the server
@@ -164,7 +164,7 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 
 	dstRawUDP := networklog.BuildUDPRecord(buf[:responseLen], origDst.String(), clientAddr.String(), proto)
 
-	networklog.AppendRecord(app.Config.Log, dstRawUDP)
+	networklog.AppendRecord(app.Config.Log, *dstRawUDP)
 
 	err = sendUDPResponse(buf[:responseLen], origDst, clientAddr)
 
