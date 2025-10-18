@@ -73,7 +73,8 @@ func (tc EatConnectResponseWriter) WriteHeader(code int) {
 
 func (tc EatConnectResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// Return the underlying connection for hijacking
-	return tc.Conn, bufio.NewReadWriter(bufio.NewReader(tc.Conn), bufio.NewWriter(tc.Conn)), nil
+	// return tc.Conn, bufio.NewReadWriter(bufio.NewReader(tc.Conn), bufio.NewWriter(tc.Conn)), nil
+	return tc, bufio.NewReadWriter(bufio.NewReader(tc), bufio.NewWriter(tc)), nil
 }
 
 const (
