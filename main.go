@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
-	"log"
-
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,13 +21,15 @@ import (
 
 var activeLinks []link.Link
 
+var log = app.GetLogger("INIT")
+
 func main() {
 	// This flag is used if we need to generate a fresh TLS certificate. More details are documented below.
 	flagGenerate := flag.Bool("generate-ca", false, "Generate a new TLS certificate")
 	flagInstall := flag.Bool("install-ca", false, "Install the certificate at cert-path. Only supported on Debian/Ubuntu.")
 	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate Path")
 	flagKeyPath := flag.String("key-path", "/tmp/witproxkey.pem", "TLS Certificate Path")
-	flagLog := flag.String("log", "/tmp/witprox.log", "Log file")
+	flagLog := flag.String("log", "/tmp/", "Log folder")
 	flagVerbose := flag.Bool("verbose", false, "Goproxy verbose logs")
 	flagPort := flag.Int("port", 1230, "Start TCP listener on this port")
 	flagUDPPort := flag.Int("udp-port", 2230, "Start UDP listener on this port")
@@ -76,34 +78,50 @@ func main() {
 		fmt.Println("Use --install-ca to install cert locally.")
 		return
 	} else if ca == nil {
-		fmt.Println("No existing certificate. Use --generate-ca to generate and save a certificate.")
+		fmt.Print("No existing certificate. Use --generate-ca to generate and save a certificate.")
 		return
 	} else {
-		log.Printf("Loaded certificate at %s\n", app.Config.CaPath)
+		log.Infof("Loaded certificate at %s\n", app.Config.CaPath)
 	}
 
 	if *flagSetup {
 		activeLinks = SetupEBPF()
 
 		cmd := exec.Command(os.Args[0], "-servers")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
 
-		log.Printf("Starting only servers\n")
+		stdoutPipe, _ := cmd.StdoutPipe()
+		stderrPipe, _ := cmd.StderrPipe()
+
 		if err := cmd.Start(); err != nil {
 			log.Fatalf("failed to start servers: %v", err)
 		}
 
+		prefix := fmt.Sprintf("[%d]", cmd.Process.Pid)
+
+		go func(r io.Reader, w io.Writer, tag string) {
+			scanner := bufio.NewScanner(r)
+			for scanner.Scan() {
+				fmt.Fprintf(w, "%s %s\n", tag, scanner.Text())
+			}
+		}(stdoutPipe, os.Stdout, prefix)
+
+		go func(r io.Reader, w io.Writer, tag string) {
+			scanner := bufio.NewScanner(r)
+			for scanner.Scan() {
+				fmt.Fprintf(w, "%s %s\n", tag, scanner.Text())
+			}
+		}(stderrPipe, os.Stderr, prefix)
+
 		pid := cmd.Process.Pid
-		log.Printf("Moving PID to cgroup: %d\n", pid)
-		moveToCgroup(pid, "/sys/fs/cgroup/witprox")
+		log.Infof("Moving PID to cgroup: %d\n", pid)
+		moveToCgroup(pid, CGROUP_WITPROX)
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 		go func() {
 			sig := <-sigChan
-			log.Printf("Received SIG %s, forwarding to child\n", sig)
+			log.Infof("Received SIG %s, forwarding to child\n", sig)
 			_ = cmd.Process.Signal(sig)
 		}()
 
@@ -114,12 +132,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("wait4: %v", err)
 		}
-		log.Printf("wait4: PID: %d\n", wpid)
+		log.Infof("wait4: PID: %d\n", wpid)
 
 		CleanUpEBPF()
 	}
 
 	if *flagServers {
+		log.Infof("Starting only servers\n")
 		tcp.SetupTLS(ca)
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -128,7 +147,7 @@ func main() {
 		<-ctx.Done()
 
 		stop()
-		log.Println("Shutting down proxy server")
+		log.Info("Shutting down proxy server")
 		app.TCPListener.Close()
 	}
 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=Witprox Daemon
+After=network.target
+
+[Service]
+ExecStart=/Users/sanchitsahay/code/witprox/proxy --setup
+WorkingDirectory=/tmp
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

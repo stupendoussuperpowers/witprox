@@ -4,7 +4,6 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -12,11 +11,17 @@ import (
 	"github.com/cilium/ebpf/link"
 )
 
+// The eBPF binaries are embedded below. Use make all to ensure these .o files
+// are present in the correct location.
+
 //go:embed internal/bpf/witprox.o
 var witproxObj []byte
 
 //go:embed internal/bpf/redirect.o
 var redirectObj []byte
+
+var CGROUP_REDIRECT = "/sys/fs/cgroup/redirect"
+var CGROUP_WITPROX = "/sys/fs/cgroup/witprox"
 
 func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
@@ -57,6 +62,7 @@ func moveToCgroup(pid int, cgroup string) error {
 }
 
 func SetupEBPF() []link.Link {
+	// Load redirect object, and pin all the maps.
 	redirectColl, err := pinMaps(redirectObj, "/sys/fs/bpf/")
 	if err != nil {
 		log.Fatal(err)
@@ -69,6 +75,7 @@ func SetupEBPF() []link.Link {
 		log.Fatal(err)
 	}
 
+	// PinByName ensures that the maps are shared between the two programs.
 	for name, m := range witproxSpec.Maps {
 		switch name {
 		case "client_map":
@@ -91,9 +98,10 @@ func SetupEBPF() []link.Link {
 
 	defer witproxColl.Close()
 
-	createCgroup("/sys/fs/cgroup/redirect")
-	createCgroup("/sys/fs/cgroup/witprox")
+	createCgroup(CGROUP_REDIRECT)
+	createCgroup(CGROUP_WITPROX)
 
+	// Pin both programs so that they can be attached later.
 	os.MkdirAll("/sys/fs/bpf/redirect", 0755)
 	os.MkdirAll("/sys/fs/bpf/witprox", 0755)
 	for name, m := range redirectColl.Programs {
@@ -101,7 +109,7 @@ func SetupEBPF() []link.Link {
 		if err := m.Pin(pp); err != nil {
 			log.Fatalf("pin prog %s: %v", name, err)
 		}
-		log.Printf("pinned prof %s to %s", name, pp)
+		log.Infof("pinned prog %s to %s", name, pp)
 	}
 
 	for name, m := range witproxColl.Programs {
@@ -109,17 +117,18 @@ func SetupEBPF() []link.Link {
 		if err := m.Pin(pp); err != nil {
 			log.Fatalf("pin prog %s: %v", name, err)
 		}
-		log.Printf("pinned prof %s to %s", name, pp)
+		log.Infof("pinned prog %s to %s", name, pp)
 	}
 
 	programLinks := make([]link.Link, 0)
+
 	programLinks = append(programLinks, AttachProgram("redirect", "track_conn", ebpf.AttachCGroupSockOps))
 	programLinks = append(programLinks, AttachProgram("redirect", "redirect_connect4", ebpf.AttachCGroupInet4Connect))
 
 	programLinks = append(programLinks, AttachProgram("witprox", "track_conn", ebpf.AttachCGroupSockOps))
 
-	//moveToCgroup(os.Getpid(), "/sys/fs/cgroup/witprox")
-
+	// The attachments are only valid so long as their links are still in memory.
+	// To ensure that the GC doesn't eat them up, we return it and store it in a global variable.
 	return programLinks
 }
 
@@ -128,7 +137,7 @@ func CleanUpEBPF() {
 	if activeLinks != nil {
 		for _, l := range activeLinks {
 			if err := l.Close(); err != nil {
-				log.Printf("error closing link: %v", err)
+				log.Infof("error closing link: %v", err)
 			}
 		}
 		activeLinks = nil
@@ -146,26 +155,22 @@ func CleanUpEBPF() {
 
 	for _, path := range pinnedObjects {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Printf("failed to remove pinned map: %s: %v", path, err)
+			log.Infof("failed to remove pinned map: %s: %v", path, err)
 		}
 	}
 
 	// Delete cgroups.
 
+	// Move this process out of the cgroup witprox so that it can be deleted.
 	moveToCgroup(os.Getpid(), "/sys/fs/cgroup/unified")
 
-	cgroups := []string{
-		"/sys/fs/cgroup/redirect",
-		"/sys/fs/cgroup/witprox",
-	}
-
-	for _, cg := range cgroups {
+	for _, cg := range []string{CGROUP_REDIRECT, CGROUP_WITPROX} {
 		if err := os.Remove(cg); err != nil && !os.IsNotExist(err) {
-			log.Printf("failed to remove cgruop %s: %v", cg, err)
+			log.Infof("failed to remove cgroup %s: %v", cg, err)
 		}
 	}
 
-	log.Println("eBPF cleanup complete.")
+	log.Info("eBPF cleanup complete.")
 }
 
 func AttachProgram(cgroup string, path string, attachType ebpf.AttachType) link.Link {

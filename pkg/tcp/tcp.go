@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,6 +28,8 @@ import (
 
 const proxyIDHeader = "X-Proxy-Req-Id"
 
+var log = app.GetLogger("TCP")
+
 var (
 	startTimes sync.Map
 )
@@ -42,17 +43,14 @@ type ConnInfo struct {
 
 var connInfoMap sync.Map
 
-var logger = app.GetLogger("TCP")
-
 func ServeTCP() {
 	var err error
 	app.TCPListener, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", app.Config.TCPPort))
 
 	if err != nil {
-		logger.Infof("Error listening on port %d\n", app.Config.TCPPort)
 		return
 	} else {
-		logger.Infof("TCP server listening on: %d\n", app.Config.TCPPort)
+		log.Infof("TCP server listening on: %d\n", app.Config.TCPPort)
 	}
 
 	for {
@@ -67,7 +65,7 @@ func ServeTCP() {
 		go func(c net.Conn) {
 			proto, br, err := detectProtocol(c)
 			if err != nil {
-				logger.Info("Error in detect Protocol:", err)
+				log.Info("Error in detect Protocol:", err)
 				c.Close()
 				return
 			}
@@ -93,7 +91,7 @@ func SetupTLS(ca *tls.Certificate) {
 	// Tag requests before sending it to the server so that we can use it to store custom metrics. (Start time in
 	// this case).
 	app.Config.ProxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		logger.Infof("Request: %s %s\n", req.Method, req.URL)
+		log.Infof("Request: %s %s\n", req.Method, req.URL)
 
 		id := uuid.NewString()
 		req.Header.Set(proxyIDHeader, id)
@@ -103,7 +101,7 @@ func SetupTLS(ca *tls.Certificate) {
 	})
 
 	app.Config.ProxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		logger.Infof("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
+		log.Infof("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
 
 		var PID uint32
 		var origDst string
@@ -112,13 +110,13 @@ func SetupTLS(ca *tls.Certificate) {
 			origInfo := v.(string)
 			fmt.Sscanf(origInfo, "%s %d %d", &origDst, &origDstPort, &PID)
 		} else {
-			logger.Infof("Unable to read connInfoMap")
+			log.Infof("Unable to read connInfoMap")
 		}
 
-		logger.Infof("PID %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
+		log.Infof("PID %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
 
 		// Use the earlier used tag to retrieve custom logging metrics, and then delete this tag before it gets
-		// stored in the logger.
+		// stored in the log.
 		var id string
 		if res != nil && res.Request != nil {
 			id = res.Request.Header.Get(proxyIDHeader)
@@ -147,9 +145,9 @@ func SetupTLS(ca *tls.Certificate) {
 
 		rec, _ := networklog.BuildTCPRecord(res.Request, res, start, time.Now(), res.Request.URL.String(), clientAddr, "tls")
 
-		err := networklog.AppendRecord(fmt.Sprintf("/tmp/tls.%d", PID), *rec)
+		err := networklog.AppendRecord(fmt.Sprintf("%s/tls.%d", app.Config.Log, PID), *rec)
 		if err != nil {
-			logger.Info("Append record failed")
+			log.Info("Append record failed")
 			return res
 		}
 
@@ -184,7 +182,7 @@ func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
 	// Peek at the first 24 bytes (enough for TLS, HTTP, HTTP/2 detection)
 	header, err := br.Peek(24)
 	if err != nil && err != bufio.ErrBufferFull {
-		logger.Info("Error!", err)
+		log.Info("Error!", err)
 		return "", nil, err
 	}
 
@@ -219,11 +217,11 @@ func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
 func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 	start := time.Now()
 
-	logger.Infof("Connection from: %v\n", conn.RemoteAddr())
+	log.Infof("Connection from: %v\n", conn.RemoteAddr())
 
 	destAddr, port, _, err := getConnInfo(conn)
 	if err != nil {
-		logger.Infof("Error getting original destination: %w\n", err)
+		log.Infof("Error getting original destination: %w\n", err)
 		return
 	}
 
@@ -231,7 +229,7 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 	dialAddr := fmt.Sprintf("%s:%d", destAddr, port)
 	dst, err := net.Dial("tcp", dialAddr)
 	if err != nil {
-		logger.Infof("dial error %v\n", err)
+		log.Infof("dial error %v\n", err)
 		return
 	}
 	defer dst.Close()
@@ -254,33 +252,33 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 
 	<-done
 
-	logger.Infof("Connection closed.\n")
+	log.Infof("Connection closed.\n")
 
 	rec, _ := networklog.BuildTCPRecord(client, server, start, time.Now(), dialAddr, conn.RemoteAddr().String(), "Unknown")
 
-	networklog.AppendRecord(app.Config.Log, *rec)
+	networklog.AppendRecord(app.Config.Log+"/raw", *rec)
 }
 
 func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
-	logger.Infof("Connection from: %v\n", conn.RemoteAddr())
+	log.Infof("Connection from: %v\n", conn.RemoteAddr())
 
 	start := time.Now()
 
 	req, err := http.ReadRequest(bufreader)
 	if err != nil {
-		logger.Infof("bad http req: %v\n", err)
+		log.Infof("bad http req: %v\n", err)
 		return
 	}
 
-	logger.Infof("Request: %s %s%s", req.Method, req.Host, req.URL)
+	log.Infof("Request: %s %s%s", req.Method, req.Host, req.URL)
 
-	_, port, _, err := getConnInfo(conn)
+	PID, port, _, err := getConnInfo(conn)
 	if err != nil {
-		logger.Infof("Error getOriginalDst: ", err)
+		log.Infof("Error getOriginalDst: ", err)
 		return
 	}
 
-	logger.Infof("port: %d\n", port)
+	log.Infof("port: %d\n", port)
 	// Connect to original target.
 
 	// usePort := ":80"
@@ -292,21 +290,21 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 
 	dst, err := net.Dial("tcp", destIP.String())
 	if err != nil {
-		logger.Infof("dial error %v\n", err)
+		log.Infof("dial error %v\n", err)
 		return
 	}
 
 	defer dst.Close()
 	// Send the originally intended request to the target.
 	if err := req.Write(dst); err != nil {
-		logger.Infof("write error: %v\n", err)
+		log.Infof("write error: %v\n", err)
 		return
 	}
 
 	// Read the response received from the target.
 	resp, err := http.ReadResponse(bufio.NewReader(dst), req)
 	if err != nil {
-		logger.Infof("read error: %v\n", err)
+		log.Infof("read error: %v\n", err)
 		return
 	}
 
@@ -315,28 +313,23 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 
 	// Forward the response back to the original client.
 	if err := resp.Write(conn); err != nil {
-		logger.Infof("failed to send to client: %v\n", err)
+		log.Infof("failed to send to client: %v\n", err)
 		_ = resp.Body.Close()
 		return
 	}
 
-	logger.Infof("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
+	log.Infof("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
 
 	_ = resp.Body.Close()
 
-	if err != nil {
-		logger.Info("Build record failed")
-		return
-	}
-
 	rec, _ := networklog.BuildTCPRecord(req, resp, start, time.Now(), fullyQualName, conn.RemoteAddr().String(), "http")
 
-	logger.Infof("HTTP Rec: %v\n", rec)
+	log.Infof("HTTP Rec: %v\n", rec)
 
 	// Save log to a log file.
-	err = networklog.AppendRecord(app.Config.Log, *rec)
+	err = networklog.AppendRecord(fmt.Sprintf("%s/http.%d", app.Config.Log, PID), *rec)
 	if err != nil {
-		logger.Info("Append record failed")
+		log.Info("Append record failed")
 		return
 	}
 }
@@ -347,7 +340,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 	// First, get the socket cookie.
 	rawConn, err := tcpConn.SyscallConn()
 	if err != nil {
-		logger.Info("Failed to get raw conn")
+		log.Info("Failed to get raw conn")
 		return nil, 0, 0, fmt.Errorf("failed to get raw conn")
 	}
 
@@ -387,7 +380,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 	// Use cookie to get info about the original connection. This runs POST eBPF builds the maps
 	connMap, err := ebpf.LoadPinnedMap("/sys/fs/bpf/server_map", nil)
 	if err != nil {
-		logger.Info("Failed to load connmap %w\n", err)
+		log.Info("Failed to load connmap %w\n", err)
 	}
 	defer connMap.Close()
 
@@ -407,7 +400,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 }
 
 func handleTLS(c net.Conn, br *bufio.Reader) {
-	logger.Info("[TLS] Connection from: ", c.RemoteAddr())
+	log.Infof("[TLS] Connection from: %s", c.RemoteAddr())
 
 	// We read the TLS Hello message sent by the client to get information about
 	// the original intended target. Unlike HTTP this is not transparently available
@@ -415,18 +408,18 @@ func handleTLS(c net.Conn, br *bufio.Reader) {
 	// conn, hello, err := tlsutils.PeekClientHello(c)
 	conn, hello, err := tlsutils.PeekClientHelloBufReader(c, br)
 	if err != nil {
-		logger.Infof("Error peaking tls - %v\n", err)
+		log.Infof("Error peaking tls - %v\n", err)
 		return
 	}
 
 	origDst, origPort, origPID, err := getConnInfo(c)
 	if err != nil {
-		logger.Info("getConnInfo Failed: ", err)
+		log.Info("getConnInfo Failed: ", err)
 	}
 
 	host := hello.ServerName
 	if host == "" {
-		logger.Info("Non SNI client")
+		log.Info("Non SNI client")
 		return
 	}
 
