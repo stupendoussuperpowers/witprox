@@ -80,9 +80,9 @@ int track_conn(struct bpf_sock_ops *skops) {
 		if (ret) 
 			bpf_printk("update server_map failed: %d\n", ret);
 		bpf_printk("updated server_map");
-//		bpf_map_delete_elem(&client_map, client_cookie);
+		bpf_map_delete_elem(&client_map, client_cookie);
 		bpf_printk("cleaned client_map");
-//		bpf_map_delete_elem(&t_2_c, &tuple);
+		bpf_map_delete_elem(&t_2_c, &tuple);
 		bpf_printk("cleaned t_2_c");
 	}
 

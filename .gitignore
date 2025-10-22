@@ -28,7 +28,7 @@ go.work.sum
 .env
 
 proxy
-
+internal/bpf/*.o
 # Editor/IDE
 # .idea/
 # .vscode/
