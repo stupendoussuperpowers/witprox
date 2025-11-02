@@ -110,7 +110,7 @@ func SetupTLS(ca *tls.Certificate) {
 			origInfo := v.(string)
 			fmt.Sscanf(origInfo, "%s %d %d", &origDst, &origDstPort, &PID)
 		} else {
-			log.Infof("Unable to read connInfoMap")
+			log.Infof("Unable to read connInfoMap\n")
 		}
 
 		log.Infof("PID %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
@@ -270,11 +270,11 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 		return
 	}
 
-	log.Infof("Request: %s %s%s", req.Method, req.Host, req.URL)
+	log.Infof("Request: %s %s%s\n", req.Method, req.Host, req.URL)
 
 	PID, port, _, err := getConnInfo(conn)
 	if err != nil {
-		log.Infof("Error getOriginalDst: ", err)
+		log.Infof("Error getOriginalDst: %v\n", err)
 		return
 	}
 
@@ -400,7 +400,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 }
 
 func handleTLS(c net.Conn, br *bufio.Reader) {
-	log.Infof("[TLS] Connection from: %s", c.RemoteAddr())
+	log.Infof("[TLS] Connection from: %s\n", c.RemoteAddr())
 
 	// We read the TLS Hello message sent by the client to get information about
 	// the original intended target. Unlike HTTP this is not transparently available

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
+	"golang.org/x/sys/unix"
 
 	"github.com/stupendoussuperpowers/witprox/pkg/app"
 	"github.com/stupendoussuperpowers/witprox/pkg/certificates"
@@ -21,52 +22,32 @@ import (
 
 var activeLinks []link.Link
 
+const PIDFILE = "/var/witnessd.pid"
+
 var log = app.GetLogger("INIT")
 
 func main() {
-	// This flag is used if we need to generate a fresh TLS certificate. More details are documented below.
-	flagGenerate := flag.Bool("generate-ca", false, "Generate a new TLS certificate")
-	flagInstall := flag.Bool("install-ca", false, "Install the certificate at cert-path. Only supported on Debian/Ubuntu.")
-	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate Path")
-	flagKeyPath := flag.String("key-path", "/tmp/witproxkey.pem", "TLS Certificate Path")
+	// Daemon-handling
+	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate path")
+	flagKeyPath := flag.String("cert-key", "/tmp/witproxkey.pem", "TLS Key path")
 	flagLog := flag.String("log", "/tmp/", "Log folder")
-	flagVerbose := flag.Bool("verbose", false, "Goproxy verbose logs")
-	flagPort := flag.Int("port", 1230, "Start TCP listener on this port")
-	flagUDPPort := flag.Int("udp-port", 2230, "Start UDP listener on this port")
-	flagSetup := flag.Bool("setup", false, "Setup eBPF")
-	flagServers := flag.Bool("servers", false, "Only run the servers, without any eBPF setups.")
+	flagVerbose := flag.Bool("verbose", false, "verbose logs for proxy")
+	flagServers := flag.Bool("servers", false, "Launch transparent proxies")
 
 	flag.Parse()
 
 	app.Config = app.WitproxConfig{
-		TCPPort: *flagPort,
-		UDPPort: *flagUDPPort,
 		CaPath:  *flagCaPath,
 		KeyPath: *flagKeyPath,
 		Log:     *flagLog,
 		Verbose: *flagVerbose,
-	}
-
-	// The workflow is to try to load the certificate stored at config.CaPath and the key at config.KeyPath.
-	// This certicate must be trusted by the client system that is making the TLS calls we want to monitor.
-	// If a certicate or key doesn't exist at the given paths, we prompt the use of --generate-ca flag.
-	//
-	// To trust a certificate on Debian/Ubuntu for example. We need to copy the certificate to /usr/local/share/ca-certificates
-	// And then run update-ca-certificates.
-
-	if *flagInstall {
-		err := certificates.InstallCA(app.Config.CaPath)
-		if err != nil {
-			fmt.Printf("Unable to install certificate at path %s with error: %v\n\n", app.Config.CaPath, err)
-			fmt.Printf("New cert generated and saved to (%s). Add it to the trusted certs on your system\n", app.Config.CaPath)
-		}
-
-		return
+		TCPPort: 1230,
+		UDPPort: 2230,
 	}
 
 	ca := certificates.LoadCA(app.Config.CaPath, app.Config.KeyPath)
 
-	if *flagGenerate {
+	if ca == nil {
 		fmt.Printf("Generating a new TLS certificate at %s\n", app.Config.CaPath)
 
 		ca = certificates.GenerateCA()
@@ -75,19 +56,55 @@ func main() {
 		}
 
 		certificates.PersistCA(ca, app.Config.CaPath, app.Config.KeyPath)
-		fmt.Println("Use --install-ca to install cert locally.")
-		return
-	} else if ca == nil {
-		fmt.Print("No existing certificate. Use --generate-ca to generate and save a certificate.")
-		return
+
 	} else {
 		log.Infof("Loaded certificate at %s\n", app.Config.CaPath)
 	}
 
-	if *flagSetup {
-		activeLinks = SetupEBPF()
+	err := certificates.InstallCA(app.Config.CaPath)
+	if err != nil {
+		fmt.Printf("Unable to install certificate at path %s with error: %v\n\n", app.Config.CaPath, err)
 
-		cmd := exec.Command(os.Args[0], "-servers")
+		fmt.Printf("New cert generated and saved to (%s). Add it to the trusted certs on your system\n", app.Config.CaPath)
+	}
+
+	if *flagServers {
+		log.Infof("Starting only servers\n")
+		tcp.SetupTLS(ca)
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		go tcp.ServeTCP()
+		go udp.ServeUDP()
+		<-ctx.Done()
+
+		stop()
+		log.Info("Shutting down proxy server")
+		app.TCPListener.Close()
+	} else {
+		if _, err := os.Stat(PIDFILE); err == nil {
+			log.Fatalf("witnessd already running.")
+		}
+
+		pidMain := os.Getpid()
+		if err := os.WriteFile(PIDFILE, []byte(fmt.Sprintf("%d", pidMain)), 0644); err != nil {
+			log.Fatalf("failed to write pid file: %v", err)
+		}
+		defer os.Remove(PIDFILE)
+
+		activeLinks = setupEBPF()
+		defer cleanUpEBPF()
+
+		cmd := exec.Command(os.Args[0], "--servers")
+
+		cgroupFD, err := unix.Open(CGROUP_WITPROX, unix.O_PATH, 0)
+		if err != nil {
+			log.Info("Couldn't run network tracing:", err)
+			return
+		}
+		cmd.SysProcAttr = &unix.SysProcAttr{
+			CgroupFD:    cgroupFD,
+			UseCgroupFD: true,
+		}
 
 		stdoutPipe, _ := cmd.StdoutPipe()
 		stderrPipe, _ := cmd.StderrPipe()
@@ -112,9 +129,7 @@ func main() {
 			}
 		}(stderrPipe, os.Stderr, prefix)
 
-		pid := cmd.Process.Pid
-		log.Infof("Moving PID to cgroup: %d\n", pid)
-		moveToCgroup(pid, CGROUP_WITPROX)
+		pidServers := cmd.Process.Pid
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -128,26 +143,10 @@ func main() {
 		var wstatus syscall.WaitStatus
 		var rusage syscall.Rusage
 
-		wpid, err := syscall.Wait4(pid, &wstatus, 0, &rusage)
+		wpid, err := syscall.Wait4(pidServers, &wstatus, 0, &rusage)
 		if err != nil {
 			log.Fatalf("wait4: %v", err)
 		}
 		log.Infof("wait4: PID: %d\n", wpid)
-
-		CleanUpEBPF()
-	}
-
-	if *flagServers {
-		log.Infof("Starting only servers\n")
-		tcp.SetupTLS(ca)
-
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		go tcp.ServeTCP()
-		go udp.ServeUDP()
-		<-ctx.Done()
-
-		stop()
-		log.Info("Shutting down proxy server")
-		app.TCPListener.Close()
 	}
 }

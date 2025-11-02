@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -23,46 +24,9 @@ var redirectObj []byte
 var CGROUP_REDIRECT = "/sys/fs/cgroup/redirect"
 var CGROUP_WITPROX = "/sys/fs/cgroup/witprox"
 
-func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
-	if err != nil {
-		return nil, fmt.Errorf("load collection spec: %w", err)
-	}
-
-	coll, err := ebpf.NewCollection(spec)
-	if err != nil {
-		return nil, fmt.Errorf("create collection: %w", err)
-	}
-
-	if err := os.MkdirAll(pinPath, 0755); err != nil {
-		return nil, fmt.Errorf("mkdir pin path: %w", err)
-	}
-
-	for name, m := range coll.Maps {
-		p := filepath.Join(pinPath, name)
-		if err := m.Pin(p); err != nil {
-			return nil, fmt.Errorf("pin map %s: %w", name, err)
-		}
-	}
-
-	return coll, nil
-}
-
-func createCgroup(path string) error {
-	if err := os.MkdirAll(path, 0755); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("mkdir cgroup: %w", err)
-	}
-
-	return nil
-}
-
-func moveToCgroup(pid int, cgroup string) error {
-	tasks := filepath.Join(cgroup, "cgroup.procs")
-	return os.WriteFile(tasks, []byte(fmt.Sprintf("%d", pid)), 0644)
-}
-
-func SetupEBPF() []link.Link {
+func setupEBPF() []link.Link {
 	// Load redirect object, and pin all the maps.
+	log.Infof("Setting up eBFP...\n")
 	redirectColl, err := pinMaps(redirectObj, "/sys/fs/bpf/")
 	if err != nil {
 		log.Fatal(err)
@@ -107,37 +71,38 @@ func SetupEBPF() []link.Link {
 	for name, m := range redirectColl.Programs {
 		pp := filepath.Join("/sys/fs/bpf/redirect", name)
 		if err := m.Pin(pp); err != nil {
-			log.Fatalf("pin prog %s: %v", name, err)
+			log.Fatalf("pin prog %s: %v\n", name, err)
 		}
-		log.Infof("pinned prog %s to %s", name, pp)
+		log.Infof("pinned prog %s to %s\n", name, pp)
 	}
 
 	for name, m := range witproxColl.Programs {
 		pp := filepath.Join("/sys/fs/bpf/witprox", name)
 		if err := m.Pin(pp); err != nil {
-			log.Fatalf("pin prog %s: %v", name, err)
+			log.Fatalf("pin prog %s: %v\n", name, err)
 		}
-		log.Infof("pinned prog %s to %s", name, pp)
+		log.Infof("pinned prog %s to %s\n", name, pp)
 	}
 
 	programLinks := make([]link.Link, 0)
 
-	programLinks = append(programLinks, AttachProgram("redirect", "track_conn", ebpf.AttachCGroupSockOps))
-	programLinks = append(programLinks, AttachProgram("redirect", "redirect_connect4", ebpf.AttachCGroupInet4Connect))
+	programLinks = append(programLinks, attachProgram("redirect", "track_conn", ebpf.AttachCGroupSockOps))
+	programLinks = append(programLinks, attachProgram("redirect", "redirect_connect4", ebpf.AttachCGroupInet4Connect))
 
-	programLinks = append(programLinks, AttachProgram("witprox", "track_conn", ebpf.AttachCGroupSockOps))
+	programLinks = append(programLinks, attachProgram("witprox", "track_conn", ebpf.AttachCGroupSockOps))
 
 	// The attachments are only valid so long as their links are still in memory.
 	// To ensure that the GC doesn't eat them up, we return it and store it in a global variable.
 	return programLinks
 }
 
-func CleanUpEBPF() {
+func cleanUpEBPF() {
 	// Remove the attached programs.
+	log.Infof("Tearing down eBPF setups\n")
 	if activeLinks != nil {
 		for _, l := range activeLinks {
 			if err := l.Close(); err != nil {
-				log.Infof("error closing link: %v", err)
+				log.Infof("error closing link: %v\n", err)
 			}
 		}
 		activeLinks = nil
@@ -151,29 +116,63 @@ func CleanUpEBPF() {
 		"/sys/fs/bpf/redirect/track_conn",
 		"/sys/fs/bpf/redirect/redirect_connect4",
 		"/sys/fs/bpf/witprox/track_conn",
+		"/sys/fs/bpf/witprox/",
+		"/sys/fs/bpf/redirect/",
 	}
 
 	for _, path := range pinnedObjects {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Infof("failed to remove pinned map: %s: %v", path, err)
+			log.Infof("failed to remove pinned map: %s: %v\n", path, err)
 		}
 	}
 
 	// Delete cgroups.
-
-	// Move this process out of the cgroup witprox so that it can be deleted.
-	moveToCgroup(os.Getpid(), "/sys/fs/cgroup/unified")
-
 	for _, cg := range []string{CGROUP_REDIRECT, CGROUP_WITPROX} {
 		if err := os.Remove(cg); err != nil && !os.IsNotExist(err) {
-			log.Infof("failed to remove cgroup %s: %v", cg, err)
+			log.Infof("failed to remove cgroup %s: %v\n", cg, err)
 		}
 	}
 
 	log.Info("eBPF cleanup complete.")
 }
 
-func AttachProgram(cgroup string, path string, attachType ebpf.AttachType) link.Link {
+func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
+	if err != nil {
+		return nil, fmt.Errorf("load collection spec: %w", err)
+	}
+
+	coll, err := ebpf.NewCollection(spec)
+	if err != nil {
+		return nil, fmt.Errorf("create collection: %w", err)
+	}
+
+	if err := os.MkdirAll(pinPath, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir pin path: %w", err)
+	}
+
+	for name, m := range coll.Maps {
+		if m == nil || strings.Contains(name, "rodata") {
+			continue
+		}
+		p := filepath.Join(pinPath, name)
+		if err := m.Pin(p); err != nil {
+			return nil, fmt.Errorf("pin map %s: %w", name, err)
+		}
+	}
+
+	return coll, nil
+}
+
+func createCgroup(path string) error {
+	if err := os.MkdirAll(path, 0755); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("mkdir cgroup: %w", err)
+	}
+
+	return nil
+}
+
+func attachProgram(cgroup string, path string, attachType ebpf.AttachType) link.Link {
 	pinnedProg, _ := ebpf.LoadPinnedProgram(fmt.Sprintf("/sys/fs/bpf/%s/%s", cgroup, path), nil)
 	l, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    "/sys/fs/cgroup/" + cgroup,
@@ -182,7 +181,7 @@ func AttachProgram(cgroup string, path string, attachType ebpf.AttachType) link.
 	})
 
 	if err != nil {
-		log.Fatalf("attach cgroup: witness track_conn")
+		log.Fatalf("attach cgroup: witness track_conn\n")
 	}
 
 	return l
