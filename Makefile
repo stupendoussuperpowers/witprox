@@ -17,6 +17,7 @@ bpf: $(BPF_OUTPUT)
 
 build: $(GO_FILES)
 	go build -o $(GO_OUTPUT) $(GO_FILES)
+	ln proxy /usr/bin/witnessd
 
 clean: 
 	rm -f $(BPF_OUTPUT) $(GO_OUTPUT)
