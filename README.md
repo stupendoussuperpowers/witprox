@@ -1,171 +1,95 @@
-## Transparent Network Proxy
+## Witness daemon: Network attestations
 
-This repo provides a binary that runs transparent HTTP and TLS proxy servers that log request/response pairs to disk.
+Witprox serves as a witness daemon to support network attestations through eBPF, and a MITM proxy to decrypt and log any TCP traffic for a given command.  
 
-The HTTP proxy is straightforward. For TLS, a trusted certificate is required. This binary can generate certificates that can be added to the client machine's trusted store.
+Integrations with `witness` and `go-witness` are staged here:
 
-TLS proxy uses two TLS connecions: `client <-1-> proxy <-2-> original target`. This allows the proxy to decrypt and log traffic. The `goproxy` package handles most of the MITM for certificate management with the client.
+[stupendoussuperpowers/witness](https://github.com/stupendoussuperpowers/witness/tree/network-tracing)
+
+[stupendoussuperpowers/go-witness](https://github.com/stupendoussuperpowers/go-witness/tree/network-tracing)
+
+### Running
+
+Through dockerhub:
+
+```
+docker pull stupendoussuperpowers/witness-ubuntu # Pull docker image.
+docker run -it --privileged stupendoussuperpowers/witness-ubuntu # Run image with elevated privileges to enable eBPF and cgroup management.
+
+... 
+# Generate a network attestation 
+$> witness run -o test-att.json --step build --network -- <build command>
+```
+
+For MacOS, use [`colima`](https://github.com/abiosoft/colima):
+
+`colima start`
+
+### Building 
+
+To build from source:
+
+```
+git clone https://github.com/stupendoussuperpowers/witprox.git && cd witprox
+docker build -t witness-ubuntu .
+
+... 
+# Generate a network attestation 
+$> witness run -o test-att.json --step build --network -- <build command>
+```
+
+### Internals
+
+To capture network traffic, we require a MITM proxy running on localhost, and eBPF programs which can tag and redirect network packets to this proxy server. 
+
+#### Transparent Proxy 
+For TLS, a trusted certificate is required. During initialization, `witprox` generates and installs a certificate to the client machine's trusted store. 
+
+The TLS proxy breaks down client requests into two separate TLS connecions: `client <-1-> proxy <-2-> original target`.
+
+ This allows the proxy to decrypt and log traffic. The `elazarl/goproxy` package handles most of the MITM for certificate management with the client.
 
 Proxies are transparent so programs don't need modifications as long as any traffic intended for logging is redirected to the correct ports. Some ways to achieve these are explored below.
 
-Conversely, the proxy doesn't need any information about the processes either, they just take as input HTTP/TLS traffic and redirect it back to the calling process after logging.
+Conversely, the proxy doesn't need any information about the processes either, it just takes as input HTTP/TLS packets and redirects it back to the calling process after logging.
 
----
+`witprox` records every network call made by a process into a dedicated file (named after its PID), which can later be read by the witness command-run attestor.
 
-### Initial Configurations
+#### Redirection and Tagging. 
 
-#### 0. Build
+eBPF is used to tag network packets with a PID and the original destination, and then to redirect this to the MITM proxy. 
 
-`make all # Builds ebpf and go files.`
+Any process in need of network capture must run in the `redirect` cgroup, and the proxy server must run in the `witprox` cgroup. 
 
-[TLS, TCP]
+The `witprox` binary is designed to be a long running daemon, which is responsible for all setups and cleanups required for running these eBPF programs. 
 
-#### 1. Generate a certificate
+Upon start, the following setup actions are performed:
 
-`./proxy --generate-ca`
+1. Check for existing TLS certificate at the provided path. 
+2. Install this certificate if not already installed. 
+3. Use the `witnessd.pid` file to ensure only one instance of `witprox` is running.
+4. Create the `redirect` and `witprox` cgroups, load, pin and attach all maps and programs to these cgroups. 
+5. Launch TCP and UDP proxy servers inside `witprox`. 
 
-#### 2. Trust this certificate on the client (example for Debian/Ubuntu) - 
+#### Generating Attestations
 
-```
-cp /tmp/witproxca.crt /usr/local/share/ca-certificates/
-sudo update-ca-certificates
-```
+Network attestations are designed as an extension to the `command-run` attestor. 
 
-If using a certificate that is already trusted by the client, skip `--generate-ca` flow and use `--cert-path` to provide this certificate.
+When the `witness run` is used with `--network`, it first ensures that `witprox` is running, and then launches the build command inside the `redirect` cgroups. This ensures that network logs are stored in `/tmp/tls.<PID>`. 
 
-`oss-rebuild` wraps individual package managers. It provides environment variables to ensure the package manager trusts the certificates it generates. (For e.g. `PIP_CERT` for `pip`, `CURL_CA_BUNDLE` for `curl` , `NODE_EXTRA_CA_CERTS` for `npm`). This removes the need for a globally trusted certificate on the client machine.
+While generating the final attestations, along with reporting `openedfiles`, we also store `networkcalls`, which are read  from the `/tmp/tls.<PID>` file mentioned earlier. 
 
-#### 3. Run proxy in the background
-
-`./proxy`
-
-#### 4. Redirect traffic to proxies
-
-When using with the `--setup` flag, traffic redirection is handled by:
-
- 1. Setting up two cgroups, `witprox`: for the proxy servers, and `redirect` for any processes that need monitoring. 
- 2. Loading the eBPF programs and maps in `internal/bpf` to the corresponding cgroups. 
- 3. Upon exit, these cgroups and eBPF pinnings are cleaned up. 
-
-If using the default port, redirect all `tcp` traffic to `localhost:1230`. The proxy detects whether the traffic is HTTP, TLS, or a raw socket, and logs the requests accordingly.
-
-If manually redirecting traffic to the proxies, run with just the `--servers` flag. 
-
----
-### Sample Logs
-
-By default all logs are stored in `/tmp/tls.%PID` for both TCP and UDP traffic.
-
-Each HTTP(S) Request/Response pair is stored as JSON in these log files as a newline, which can be later inspected using tools such as `jq`. 
-
-Example log from running `npm install is-even` - 
-
-```
-{
-    "timestamp": "2025-10-19T18:50:57.978038091-04:00",
-    "duration": 40674664,
-    "protocol": "tcp",
-    "src_addr": "127.0.0.1:56074",
-    "dst_addr": "https://registry.npmjs.org:443/is-even/-/is-even-1.0.0.tgz",
-    "data": {
-        "request": {
-            "tls": true,
-            "method": "GET",
-            "headers": {
-                "Accept": [
-                  "*/*"
-                ],
-                "Npm-Command": [
-                  "install"
-                    ],
-                    "Pacote-Integrity": [
-                      "sha512-LEhnkAdJqic4Dbqn58A0y52IXoHWlsueqQkKfMfdEnIYG8A1sm/GHidKkS6yvXlMoRrkM34csHnXQtOqcb+Jzg=="
-                    ],
-                    "Pacote-Pkg-Id": [
-                      "remote:is-even@https://registry.npmjs.org/is-even/-/is-even-1.0.0.tgz"
-                    ],
-                    "Pacote-Req-Type": [
-                      "tarball"
-                    ],
-                    "Pacote-Version": [
-                      "12.0.3"
-                    ],
-                    "User-Agent": [
-                      "npm/8.5.1 node/v12.22.9 linux x64 workspaces/false"
-                    ]
-              },
-            "bytes": 0,
-            "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        },
-        "response": {
-            "tls": true,
-            "status_code": 200,
-            "headers": {
-                "Accept-Ranges": [
-                    "bytes"
-                ],
-                "Access-Control-Allow-Origin": [
-                    "*"
-                ],
-                "Age": [
-                    "341367"
-                ],
-                "Cache-Control": [
-                    "public, immutable, max-age=31557600"
-                ],
-                "Cf-Cache-Status": [
-                    "HIT"
-                ],
-                "Cf-Ray": [
-                    "9913d66048407039-EWR"
-                ],
-                "Connection": [
-                    "keep-alive"
-                ],
-                "Content-Length": [
-                    "2163"
-                ],
-                "Content-Type": [
-                    "application/octet-stream"
-                ],
-                "Date": [
-                    "Sun, 19 Oct 2025 22:50:57 GMT"
-                ],
-                "Etag": [
-                    "\"009dcdfe3ddfc69d386f7abb26fe6d0c\""
-                ],
-                "Last-Modified": [
-                    "Sun, 27 May 2018 04:58:57 GMT"
-                ],
-                "Server": [
-                    "cloudflare"
-                ],
-                "Set-Cookie": [
-                    "_cfuvid=3Ukms6ZiSoPKlmmgehU45_.0ShY.bqcitIACuvNqb_4-1760914257991-0.0.1.1-604800000; path=/; domain=.npmjs.org; HttpOnly; Secure; SameSite=None"
-                ],
-                "Vary": [
-                    "Accept-Encoding"
-                ]
-            },
-            "bytes": 2163,
-            "hash": "d77c6aeabdfb84feed20106b7533975fe68d17d1fa7969672ddf8efb2c37b60c"
-        }
-    }
-}
-```
+The new schema for `command-run` can be seen [here](https://github.com/stupendoussuperpowers/go-witness/blob/network-tracing/schemagen/command-run.json).
 
 --- 
-### Configurable Settings
+### Command Line Flags
 
-Command line flags for `./proxy`
 
 | Argument | Default Value | Description | 
 | -------- | ------------- | ----------- |
-| `--generate-ca` |  `false` | Generate a new TLS certificate and terminate early. | 
 | `--verbose` | `false` | Enable verbose logs for `goproxy` TLS server.|
-| `--tcp-port` | `1230` | Configure the TCP Port on localhost | 
-| `--udp-port` | `2230` | Configure the UDP Port on localhost | 
+| `--log` | `/tmp/` | Log folder for `witprox` and network logs. | 
 | `--cert-path` | `/tmp/witproxca.crt` | TLS Certificate Path | 
 | `--key-path` | `/tmp/witproxkey.pem` | TLS Certificate Key Path | 
-| `--setup` | `false` | Run eBPF setups and clean up when running the proxy servers
 | `--servers` | `false` | Only run the proxy servers without any setup. 
+
