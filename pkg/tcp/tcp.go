@@ -279,12 +279,6 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 	}
 
 	log.Infof("port: %d\n", port)
-	// Connect to original target.
-
-	// usePort := ":80"
-	// if strings.Contains(req.Host, ":") {
-	// 	usePort = ""
-	// }
 
 	destIP := networklog.IPAddr{Host: req.Host, Port: int(port)}
 
