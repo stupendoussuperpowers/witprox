@@ -6,12 +6,12 @@ RUN git clone -b network-tracing https://github.com/stupendoussuperpowers/go-wit
 
 WORKDIR /build/witness
 RUN go mod edit -replace github.com/in-toto/go-witness=../go-witness && go mod tidy
-RUN go build -o /witprox-bin/witness .
+RUN go build -o ./bin/witness ./main.go 
 
 FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND noninteractive
-ENV container docker
+ENV DEBIAN_FRONTEND=noninteractive
+ENV container=docker
 WORKDIR /build 
 
 RUN apt-get update && \
@@ -36,25 +36,22 @@ RUN apt-get update && \
 	linux-tools-generic && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV PATH "/usr/lib/linux-tools/6.8.0-64-generic:${PATH}"
+ENV PATH="/usr/lib/linux-tools/6.8.0-64-generic:${PATH}"
 
-COPY . /src/witprox 
+COPY . /src/witprox
 
-WORKDIR /src
-RUN git clone https://github.com/stupendoussuperpowers/goproxy.git
+WORKDIR /src/witprox
 
-WORKDIR /src/witprox 
-RUN go mod edit -replace github.com/elazarl/goproxy=../goproxy && go mod tidy
-RUN make all 
-
-RUN cp proxy /usr/local/bin/witprox
+RUN go mod tidy
+RUN make all
+RUN ln ./bin/witnessd /usr/bin/witnessd
 
 RUN mkdir -p /sys/fs/bpf /sys/fs/cgroup 
 
-COPY --from=builder /witprox-bin/witness /usr/local/bin/witness
+COPY --from=builder /build/witness/bin/witness /usr/bin/witness
 
-COPY entry.sh /usr/local/bin/entry.sh 
-RUN chmod +x /usr/local/bin/entry.sh 
+COPY ./entry.sh /usr/bin/entry.sh 
+RUN chmod +x /usr/bin/entry.sh 
 
 WORKDIR /root 
-CMD ["/usr/local/bin/entry.sh"]
+CMD ["/usr/bin/entry.sh"] 
