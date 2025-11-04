@@ -18,6 +18,19 @@ type WitproxConfig struct {
 	ProxyServer *goproxy.ProxyHttpServer
 }
 
+func (wc *WitproxConfig) Cli() []string {
+	cliArgs := []string{
+		"--cert-path", wc.CaPath,
+		"--key-path", wc.KeyPath,
+		"--log", wc.Log,
+	}
+	if wc.Verbose {
+		cliArgs = append(cliArgs, "--verbose")
+	}
+
+	return cliArgs
+}
+
 var (
 	TCPListener  net.Listener
 	UDPListener  *net.UDPConn
