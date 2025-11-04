@@ -145,11 +145,13 @@ func SetupTLS(ca *tls.Certificate) {
 
 		rec, _ := networklog.BuildTCPRecord(res.Request, res, start, time.Now(), res.Request.URL.String(), clientAddr, "tls")
 
-		err := networklog.AppendRecord(fmt.Sprintf("%s/tls.%d", app.Config.Log, PID), *rec)
-		if err != nil {
-			log.Info("Append record failed")
-			return res
-		}
+		// err := networklog.AppendRecord(fmt.Sprintf("%s/tls.%d", app.Config.Log, PID), *rec)
+		// if err != nil {
+		// 	log.Info("Append record failed")
+		// 	return res
+		// }
+
+		app.StoreLog(int(PID), *rec)
 
 		return res
 	})
@@ -272,7 +274,7 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 
 	log.Infof("Request: %s %s%s\n", req.Method, req.Host, req.URL)
 
-	PID, port, _, err := getConnInfo(conn)
+	_, port, PID, err := getConnInfo(conn)
 	if err != nil {
 		log.Infof("Error getOriginalDst: %v\n", err)
 		return
@@ -321,11 +323,13 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 	log.Infof("HTTP Rec: %v\n", rec)
 
 	// Save log to a log file.
-	err = networklog.AppendRecord(fmt.Sprintf("%s/http.%d", app.Config.Log, PID), *rec)
-	if err != nil {
-		log.Info("Append record failed")
-		return
-	}
+	//err = networklog.AppendRecord(fmt.Sprintf("%s/http.%d", app.Config.Log, PID), *rec)
+	//if err != nil {
+	//	log.Info("Append record failed")
+	//	return
+	//}
+
+	app.StoreLog(int(PID), *rec)
 }
 
 func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {

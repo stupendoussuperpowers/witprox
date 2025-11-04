@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/stupendoussuperpowers/witprox/pkg/app"
 	"github.com/stupendoussuperpowers/witprox/pkg/certificates"
+	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
 	"github.com/stupendoussuperpowers/witprox/pkg/tcp"
 	"github.com/stupendoussuperpowers/witprox/pkg/udp"
 )
@@ -72,14 +76,21 @@ func main() {
 		log.Infof("Starting only servers\n")
 		tcp.SetupTLS(ca)
 
+		userver := &UnixServer{
+			socketPath: SOCKET_PATH,
+		}
+		app.NetworkStore = make(map[int][]networklog.Packet)
+
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		go tcp.ServeTCP()
 		go udp.ServeUDP()
+		go userver.Start()
 		<-ctx.Done()
 
 		stop()
 		log.Info("Shutting down proxy server")
 		app.TCPListener.Close()
+		userver.listener.Close()
 	} else {
 		if _, err := os.Stat(PIDFILE); err == nil {
 			log.Fatalf("witnessd already running.")
@@ -148,5 +159,74 @@ func main() {
 			log.Fatalf("wait4: %v", err)
 		}
 		log.Infof("wait4: PID: %d\n", wpid)
+	}
+}
+
+const SOCKET_PATH = "/var/witnessd.sock"
+
+type UnixServer struct {
+	socketPath string
+	listener   net.Listener
+}
+
+func (s *UnixServer) Start() error {
+	os.Remove(SOCKET_PATH)
+
+	listener, err := net.Listen("unix", SOCKET_PATH)
+	if err != nil {
+		return fmt.Errorf("failed to create socket: %w", err)
+	}
+
+	s.listener = listener
+
+	if err := os.Chmod(SOCKET_PATH, 0600); err != nil {
+		return fmt.Errorf("failed to set socket permissions: %w", err)
+	}
+
+	log.Info("Daemon socket listening")
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Infof("Accept error: %v\n", err)
+			continue
+		}
+
+		go s.handleConnection(conn)
+	}
+}
+
+func (s *UnixServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	_, ok := conn.(*net.UnixConn)
+	if !ok {
+		log.Infof("Not a unix connection")
+		return
+	}
+
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			conn.Write([]byte("ERROR invalid command\n"))
+			continue
+		}
+
+		cmd := parts[0]
+		switch cmd {
+		case "GET":
+			var pid int
+			fmt.Sscanf(parts[1], "%d", &pid)
+
+			logs, _ := app.FetchLogs(pid)
+
+			for _, log := range logs {
+				data, _ := json.Marshal(log)
+				conn.Write(append(data, '\n'))
+			}
+			conn.Write([]byte("END\n"))
+		}
 	}
 }
