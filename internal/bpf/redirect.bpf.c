@@ -51,6 +51,11 @@ int redirect_connect4(struct bpf_sock_addr *ctx) {
 	if (bpf_ntohl(o_dst_ip) == 0x74000001 && bpf_ntohs(o_dst_port) == 1230)
 		return 1;
 
+	// This is for retrieving PIDs that will be consistent with the namespace they 
+	// are running in. Using get_current_pid_tgid() directly returns PID of the host, 
+	// rather than say a Docker container. 
+	//
+	// On linux >= 6.10, this can be replaced with get_current_ns_pid_tgid() 
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 
 	struct pid *pid_struct = NULL;
