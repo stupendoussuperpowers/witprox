@@ -30,6 +30,7 @@ go.work.sum
 proxy
 bin/ 
 internal/bpf/*.o
+internal/bpf/vmlinux.h
 # Editor/IDE
 # .idea/
 # .vscode/
