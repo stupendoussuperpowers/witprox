@@ -2,8 +2,6 @@ package udp
 
 import (
 	"encoding/binary"
-	"fmt"
-	"log"
 	"net"
 	"os"
 	"time"
@@ -15,6 +13,8 @@ import (
 	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
 )
 
+var log = app.GetLogger("UDP")
+
 func getOriginalDstUDP(oob []byte) (*net.UDPAddr, error) {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
@@ -24,7 +24,7 @@ func getOriginalDstUDP(oob []byte) (*net.UDPAddr, error) {
 	for _, msg := range msgs {
 		if msg.Header.Level == unix.SOL_IP && msg.Header.Type == unix.IP_ORIGDSTADDR {
 			if len(msg.Data) < unix.SizeofSockaddrInet4 {
-				return nil, fmt.Errorf("short sockaddr_in")
+				return nil, log.Errorf("short sockaddr_in")
 			}
 
 			sa := *(*unix.RawSockaddrInet4)(unsafe.Pointer(&msg.Data[0]))
@@ -35,7 +35,7 @@ func getOriginalDstUDP(oob []byte) (*net.UDPAddr, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no original destination found")
+	return nil, log.Errorf("no original destination found")
 }
 
 func ServeUDP() {
@@ -45,20 +45,20 @@ func ServeUDP() {
 	// Create raw socket for TPROXY
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP)
 	if err != nil {
-		log.Printf("Failed to create socket: %v\n", err)
+		log.Infof("Failed to create socket: %v", err)
 		return
 	}
 	defer unix.Close(fd)
 
 	// Enable transparent proxying for TPROXY
 	if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
-		log.Printf("Failed to set IP_TRANSPARENT: %v\n", err)
+		log.Infof("Failed to set IP_TRANSPARENT: %v", err)
 		return
 	}
 
 	// Enable receiving original destination address (works with TPROXY)
 	if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1); err != nil {
-		log.Printf("Failed to set IP_RECVORIGDSTADDR: %v\n", err)
+		log.Infof("Failed to set IP_RECVORIGDSTADDR: %v", err)
 		return
 	}
 
@@ -67,7 +67,7 @@ func ServeUDP() {
 	copy(sa.Addr[:], net.IPv4zero.To4())
 
 	if err := unix.Bind(fd, sa); err != nil {
-		log.Printf("Failed to bind: %v\n", err)
+		log.Infof("Failed to bind: %v", err)
 		return
 	}
 
@@ -75,13 +75,13 @@ func ServeUDP() {
 	file := os.NewFile(uintptr(fd), "tproxy-udp")
 	connPC, err := net.FilePacketConn(file)
 	if err != nil {
-		log.Printf("Failed to create packet conn: %v\n", err)
+		log.Infof("Failed to create packet conn: %v", err)
 		return
 	}
 	conn := connPC.(*net.UDPConn)
 	defer conn.Close()
 
-	log.Printf("UDP TPROXY listening on port %d\n", port)
+	log.Infof("UDP TPROXY listening on port %d", port)
 
 	buf := make([]byte, 4096)
 	oob := make([]byte, 4096)
@@ -89,14 +89,14 @@ func ServeUDP() {
 	for {
 		n, oobn, _, clientAddr, err := conn.ReadMsgUDP(buf, oob)
 		if err != nil {
-			log.Printf("Read error: %v\n", err)
+			log.Infof("Read error: %v", err)
 			continue
 		}
 
 		// Extract original destination from TPROXY
 		origDst, err := getOriginalDstUDP(oob[:oobn])
 		if err != nil {
-			log.Printf("Failed to get original destination: %v\n", err)
+			log.Infof("Failed to get original destination: %v", err)
 			continue
 		}
 
@@ -104,7 +104,7 @@ func ServeUDP() {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		log.Printf("Received %d bytes from %s for %s\n", n, clientAddr.String(), origDst.String())
+		log.Infof("Received %d bytes from %s for %s", n, clientAddr.String(), origDst.String())
 
 		// Log received data from client
 
@@ -136,10 +136,10 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 
 	// For UDP, handle each packet individually (stateless)
 	// Create a temporary connection to the server
-	log.Printf("Dialing server %v\n", origDst)
+	log.Infof("Dialing server %v", origDst)
 	serverConn, err := net.DialUDP("udp", nil, origDst)
 	if err != nil {
-		log.Printf("Failed to dial server %v: %v\n", origDst, err)
+		log.Infof("Failed to dial server %v: %v", origDst, err)
 		return
 	}
 	defer serverConn.Close()
@@ -147,7 +147,7 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 	// Send data to server
 	_, err = serverConn.Write(data)
 	if err != nil {
-		log.Printf("Failed to write to server: %v\n", err)
+		log.Infof("Failed to write to server: %v", err)
 		return
 	}
 
@@ -156,7 +156,7 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 	buf := make([]byte, 4096)
 	responseLen, err := serverConn.Read(buf)
 	if err != nil {
-		log.Printf("Failed to read from server: %v\n", err)
+		log.Infof("Failed to read from server: %v", err)
 		return
 	}
 
@@ -169,7 +169,7 @@ func handleUDPPacket(proxyConn *net.UDPConn, clientAddr *net.UDPAddr, origDst *n
 	err = sendUDPResponse(buf[:responseLen], origDst, clientAddr)
 
 	if err != nil {
-		log.Printf("Failed to send response to client: %v\n", err)
+		log.Infof("Failed to send response to client: %v", err)
 		return
 	}
 }
@@ -205,6 +205,6 @@ func sendUDPResponse(payload []byte, origSrc, clientDst *net.UDPAddr) error {
 		return err
 	}
 
-	log.Printf("Sent %d bytes forged from %v to %v", len(payload), origSrc, clientDst)
+	log.Infof("Sent %d bytes forged from %v to %v", len(payload), origSrc, clientDst)
 	return nil
 }

@@ -2,10 +2,14 @@ package app
 
 import (
 	"fmt"
-	"github.com/elazarl/goproxy"
-	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
 	"log"
 	"net"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/elazarl/goproxy"
+	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
 )
 
 type WitproxConfig struct {
@@ -21,7 +25,7 @@ type WitproxConfig struct {
 func (wc *WitproxConfig) Cli() []string {
 	cliArgs := []string{
 		"--cert-path", wc.CaPath,
-		"--key-path", wc.KeyPath,
+		"--cert-key", wc.KeyPath,
 		"--log", wc.Log,
 	}
 	if wc.Verbose {
@@ -35,7 +39,7 @@ var (
 	TCPListener  net.Listener
 	UDPListener  *net.UDPConn
 	Config       WitproxConfig
-	NetworkStore map[int][]networklog.Packet
+	NetworkStore map[uint32][]networklog.Packet
 )
 
 // helper to print a full dump of NetworkStore
@@ -55,53 +59,67 @@ func printNetworkStoreState(prefix string) {
 	fmt.Println("==============================")
 }
 
-func StoreLog(pid int, pkt networklog.Packet) {
+func StoreLog(pid uint32, pkt networklog.Packet) {
 	NetworkStore[pid] = append(NetworkStore[pid], pkt)
-	printNetworkStoreState(fmt.Sprintf("store %d", pid))
+	if Config.Verbose {
+		printNetworkStoreState(fmt.Sprintf("store %d", pid))
+	}
 }
 
-func FetchLogs(pid int) ([]networklog.Packet, bool) {
+func FetchLogs(pid uint32) ([]networklog.Packet, bool) {
 	entries, ok := NetworkStore[pid]
-	printNetworkStoreState(fmt.Sprintf("fetch %d", pid))
-
+	if Config.Verbose {
+		printNetworkStoreState(fmt.Sprintf("fetch %d", pid))
+	}
 	delete(NetworkStore, pid)
 	return entries, ok
 }
 
+var logMu sync.Mutex
+
 type Logger struct {
 	Context string
+	PID     int
+}
+
+func timestamp() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func (l Logger) log(level, format string, args ...any) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	formatStr := "%s [PID: %d] %-5s %-5s %s \n"
+	msg := fmt.Sprintf(formatStr, timestamp(), l.PID, level, l.Context, fmt.Sprintf(format, args...))
+	os.Stdout.Write([]byte(msg))
 }
 
 func (l Logger) Infof(format string, args ...any) {
-	pre := fmt.Sprintf("[INFO] %s\t", l.Context)
-	fmt.Printf(pre+format, args...)
+	l.log("INFO", format, args...)
 }
 
-func (l Logger) Info(format string, args ...any) {
-	pre := fmt.Sprintf("[INFO] %s\t", l.Context)
-	fmt.Println(append([]any{pre}, args...)...)
+func (l Logger) Fatalf(format string, args ...any) {
+	l.log("FATAL", format, args...)
+	log.Fatal("")
 }
 
-func (l Logger) Errorf(format string, args ...any) {
-	pre := fmt.Sprintf("[ERROR] %s\t", l.Context)
-	fmt.Printf(pre+format, args...)
+func (l Logger) Errorf(format string, args ...any) error {
+	l.log("ERROR", format, args...)
+	return fmt.Errorf(format, args...)
 }
 
-func (l Logger) Error(format string, args ...any) {
-	pre := fmt.Sprintf("[Error] %s\t", l.Context)
-	fmt.Println(append([]any{pre}, args...)...)
+func (l Logger) Info(args ...any) {
+	l.Infof("%s", fmt.Sprintln(args...))
+}
+
+func (l Logger) Error(args ...any) error {
+	return l.Errorf("%s", fmt.Sprintln(args...))
 }
 
 func (l Logger) Fatal(args ...any) {
-	pre := fmt.Sprintf("[FATAL] %s\t", l.Context)
-	log.Fatal(append([]any{pre}, args...)...)
-}
-
-func (l Logger) Fatalf(format string, v ...any) {
-	pre := fmt.Sprintf("[FATAL] %s\t", l.Context)
-	log.Fatalf(pre+format, v...)
+	l.Fatalf("%s", fmt.Sprintln(args...))
 }
 
 func GetLogger(context string) *Logger {
-	return &Logger{Context: context}
+	return &Logger{Context: context, PID: os.Getpid()}
 }

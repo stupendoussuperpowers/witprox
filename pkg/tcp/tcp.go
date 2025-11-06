@@ -50,7 +50,7 @@ func ServeTCP() {
 	if err != nil {
 		return
 	} else {
-		log.Infof("TCP server listening on: %d\n", app.Config.TCPPort)
+		log.Infof("TCP server listening on: %d", app.Config.TCPPort)
 	}
 
 	for {
@@ -59,7 +59,7 @@ func ServeTCP() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Fatalf("TCPListener.Accept() error: %v\n", err)
+			log.Fatalf("TCPListener.Accept() error: %v", err)
 		}
 
 		go func(c net.Conn) {
@@ -91,7 +91,7 @@ func SetupTLS(ca *tls.Certificate) {
 	// Tag requests before sending it to the server so that we can use it to store custom metrics. (Start time in
 	// this case).
 	app.Config.ProxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		log.Infof("Request: %s %s\n", req.Method, req.URL)
+		log.Infof("Request: %s %s", req.Method, req.URL)
 
 		id := uuid.NewString()
 		req.Header.Set(proxyIDHeader, id)
@@ -101,7 +101,7 @@ func SetupTLS(ca *tls.Certificate) {
 	})
 
 	app.Config.ProxyServer.OnResponse().DoFunc(func(res *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		log.Infof("Response: %d %s %s\n", res.StatusCode, res.Request.Method, res.Request.URL)
+		log.Infof("Response: %d %s %s", res.StatusCode, res.Request.Method, res.Request.URL)
 
 		var PID uint32
 		var origDst string
@@ -110,10 +110,10 @@ func SetupTLS(ca *tls.Certificate) {
 			origInfo := v.(string)
 			fmt.Sscanf(origInfo, "%s %d %d", &origDst, &origDstPort, &PID)
 		} else {
-			log.Infof("Unable to read connInfoMap\n")
+			log.Infof("Unable to read connInfoMap")
 		}
 
-		log.Infof("PID %d wants to talk to %s:%d\n", PID, origDst, origDstPort)
+		log.Infof("PID %d wants to talk to %s:%d", PID, origDst, origDstPort)
 
 		// Use the earlier used tag to retrieve custom logging metrics, and then delete this tag before it gets
 		// stored in the log.
@@ -145,13 +145,7 @@ func SetupTLS(ca *tls.Certificate) {
 
 		rec, _ := networklog.BuildTCPRecord(res.Request, res, start, time.Now(), res.Request.URL.String(), clientAddr, "tls")
 
-		// err := networklog.AppendRecord(fmt.Sprintf("%s/tls.%d", app.Config.Log, PID), *rec)
-		// if err != nil {
-		// 	log.Info("Append record failed")
-		// 	return res
-		// }
-
-		app.StoreLog(int(PID), *rec)
+		app.StoreLog(PID, *rec)
 
 		return res
 	})
@@ -219,11 +213,11 @@ func detectProtocol(c net.Conn) (string, *bufio.Reader, error) {
 func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 	start := time.Now()
 
-	log.Infof("Connection from: %v\n", conn.RemoteAddr())
+	log.Infof("Connection from: %v", conn.RemoteAddr())
 
-	destAddr, port, _, err := getConnInfo(conn)
+	destAddr, port, PID, err := getConnInfo(conn)
 	if err != nil {
-		log.Infof("Error getting original destination: %w\n", err)
+		log.Infof("Error getting original destination: %v", err)
 		return
 	}
 
@@ -231,7 +225,7 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 	dialAddr := fmt.Sprintf("%s:%d", destAddr, port)
 	dst, err := net.Dial("tcp", dialAddr)
 	if err != nil {
-		log.Infof("dial error %v\n", err)
+		log.Infof("dial error %v", err)
 		return
 	}
 	defer dst.Close()
@@ -254,53 +248,53 @@ func handleDefault(conn net.Conn, bufreader *bufio.Reader) {
 
 	<-done
 
-	log.Infof("Connection closed.\n")
+	log.Infof("Connection closed.")
 
 	rec, _ := networklog.BuildTCPRecord(client, server, start, time.Now(), dialAddr, conn.RemoteAddr().String(), "Unknown")
 
-	networklog.AppendRecord(app.Config.Log+"/raw", *rec)
+	app.StoreLog(PID, *rec)
 }
 
 func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
-	log.Infof("Connection from: %v\n", conn.RemoteAddr())
+	log.Infof("Connection from: %v", conn.RemoteAddr())
 
 	start := time.Now()
 
 	req, err := http.ReadRequest(bufreader)
 	if err != nil {
-		log.Infof("bad http req: %v\n", err)
+		log.Infof("bad http req: %v", err)
 		return
 	}
 
-	log.Infof("Request: %s %s%s\n", req.Method, req.Host, req.URL)
+	log.Infof("Request: %s %s%s", req.Method, req.Host, req.URL)
 
 	_, port, PID, err := getConnInfo(conn)
 	if err != nil {
-		log.Infof("Error getOriginalDst: %v\n", err)
+		log.Infof("Error getOriginalDst: %v", err)
 		return
 	}
 
-	log.Infof("port: %d\n", port)
+	log.Infof("port: %d", port)
 
 	destIP := networklog.IPAddr{Host: req.Host, Port: int(port)}
 
 	dst, err := net.Dial("tcp", destIP.String())
 	if err != nil {
-		log.Infof("dial error %v\n", err)
+		log.Infof("dial error %v", err)
 		return
 	}
 
 	defer dst.Close()
 	// Send the originally intended request to the target.
 	if err := req.Write(dst); err != nil {
-		log.Infof("write error: %v\n", err)
+		log.Infof("write error: %v", err)
 		return
 	}
 
 	// Read the response received from the target.
 	resp, err := http.ReadResponse(bufio.NewReader(dst), req)
 	if err != nil {
-		log.Infof("read error: %v\n", err)
+		log.Infof("read error: %v", err)
 		return
 	}
 
@@ -309,27 +303,20 @@ func handleHTTP(conn net.Conn, bufreader *bufio.Reader) {
 
 	// Forward the response back to the original client.
 	if err := resp.Write(conn); err != nil {
-		log.Infof("failed to send to client: %v\n", err)
+		log.Infof("failed to send to client: %v", err)
 		_ = resp.Body.Close()
 		return
 	}
 
-	log.Infof("Response: %d %s %s%s\n", resp.StatusCode, req.Method, req.Host, req.URL)
+	log.Infof("Response: %d %s %s%s", resp.StatusCode, req.Method, req.Host, req.URL)
 
 	_ = resp.Body.Close()
 
 	rec, _ := networklog.BuildTCPRecord(req, resp, start, time.Now(), fullyQualName, conn.RemoteAddr().String(), "http")
 
-	log.Infof("HTTP Rec: %v\n", rec)
+	log.Infof("HTTP Rec: %v", rec)
 
-	// Save log to a log file.
-	//err = networklog.AppendRecord(fmt.Sprintf("%s/http.%d", app.Config.Log, PID), *rec)
-	//if err != nil {
-	//	log.Info("Append record failed")
-	//	return
-	//}
-
-	app.StoreLog(int(PID), *rec)
+	app.StoreLog(PID, *rec)
 }
 
 func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
@@ -378,7 +365,7 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 	// Use cookie to get info about the original connection. This runs POST eBPF builds the maps
 	connMap, err := ebpf.LoadPinnedMap("/sys/fs/bpf/server_map", nil)
 	if err != nil {
-		log.Info("Failed to load connmap %w\n", err)
+		log.Info("Failed to load connmap %w", err)
 	}
 	defer connMap.Close()
 
@@ -398,15 +385,14 @@ func getConnInfo(conn net.Conn) (net.IP, uint32, uint32, error) {
 }
 
 func handleTLS(c net.Conn, br *bufio.Reader) {
-	log.Infof("[TLS] Connection from: %s\n", c.RemoteAddr())
+	log.Infof("[TLS] Connection from: %s", c.RemoteAddr())
 
 	// We read the TLS Hello message sent by the client to get information about
 	// the original intended target. Unlike HTTP this is not transparently available
 	// and needs some parsing on our end.
-	// conn, hello, err := tlsutils.PeekClientHello(c)
 	conn, hello, err := tlsutils.PeekClientHelloBufReader(c, br)
 	if err != nil {
-		log.Infof("Error peaking tls - %v\n", err)
+		log.Infof("Error peaking tls - %v", err)
 		return
 	}
 

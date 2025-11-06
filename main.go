@@ -32,7 +32,6 @@ const SOCKET_PATH = "/var/witnessd.sock"
 var log = app.GetLogger("INIT")
 
 func main() {
-	// Daemon-handling
 	flagCaPath := flag.String("cert-path", "/tmp/witproxca.crt", "TLS Certificate path")
 	flagKeyPath := flag.String("cert-key", "/tmp/witproxkey.pem", "TLS Key path")
 	flagLog := flag.String("log", "/tmp/", "Log folder")
@@ -50,11 +49,12 @@ func main() {
 		UDPPort: 2230,
 	}
 
+	// Only spawn the Proxy servers. This flow is used by the daemon itself once it's done setting up eBPFs and cgroups.
 	if *flagServers {
 		ca := certificates.LoadCA(app.Config.CaPath, app.Config.KeyPath)
 
 		if ca == nil {
-			fmt.Printf("Generating a new TLS certificate at %s\n", app.Config.CaPath)
+			log.Infof("Generating a new TLS certificate at %s", app.Config.CaPath)
 
 			ca = certificates.GenerateCA()
 			if ca == nil {
@@ -64,23 +64,21 @@ func main() {
 			certificates.PersistCA(ca, app.Config.CaPath, app.Config.KeyPath)
 
 		} else {
-			log.Infof("Loaded certificate at %s\n", app.Config.CaPath)
+			log.Infof("Loaded certificate at %s", app.Config.CaPath)
 		}
 
 		err := certificates.InstallCA(app.Config.CaPath)
 		if err != nil {
-			fmt.Printf("Unable to install certificate at path %s with error: %v\n\n", app.Config.CaPath, err)
-
-			fmt.Printf("New cert generated and saved to (%s). Add it to the trusted certs on your system\n", app.Config.CaPath)
+			log.Fatalf("Unable to install certificate at path %s with error: %v", app.Config.CaPath, err)
 		}
 
-		log.Infof("Starting only servers\n")
+		log.Infof("Starting only servers")
 		tcp.SetupTLS(ca)
 
 		userver := &UnixServer{
 			socketPath: SOCKET_PATH,
 		}
-		app.NetworkStore = make(map[int][]networklog.Packet)
+		app.NetworkStore = make(map[uint32][]networklog.Packet)
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		go tcp.ServeTCP()
@@ -89,7 +87,7 @@ func main() {
 		<-ctx.Done()
 
 		stop()
-		log.Info("Shutting down proxy server")
+		log.Info("Shutting down proxy servers")
 		app.TCPListener.Close()
 		userver.listener.Close()
 	} else {
@@ -106,6 +104,7 @@ func main() {
 		activeLinks = setupEBPF()
 		defer cleanUpEBPF()
 
+		// Launch the servers inside the cgroup WITPROX.
 		args := append([]string{"--servers"}, app.Config.Cli()...)
 		cmd := exec.Command(os.Args[0], args...)
 
@@ -126,21 +125,20 @@ func main() {
 			log.Fatalf("failed to start servers: %v", err)
 		}
 
-		prefix := fmt.Sprintf("[%d]", cmd.Process.Pid)
-
-		go func(r io.Reader, w io.Writer, tag string) {
+		// Copy over logs from --servers process to the main Stdout/Stderr log
+		go func(r io.Reader, w io.Writer) {
 			scanner := bufio.NewScanner(r)
 			for scanner.Scan() {
-				fmt.Fprintf(w, "%s %s\n", tag, scanner.Text())
+				fmt.Fprintf(w, "%s\n", scanner.Text())
 			}
-		}(stdoutPipe, os.Stdout, prefix)
+		}(stdoutPipe, os.Stdout)
 
-		go func(r io.Reader, w io.Writer, tag string) {
+		go func(r io.Reader, w io.Writer) {
 			scanner := bufio.NewScanner(r)
 			for scanner.Scan() {
-				fmt.Fprintf(w, "%s %s\n", tag, scanner.Text())
+				fmt.Fprintf(w, "%s\n", scanner.Text())
 			}
-		}(stderrPipe, os.Stderr, prefix)
+		}(stderrPipe, os.Stderr)
 
 		pidServers := cmd.Process.Pid
 
@@ -149,18 +147,17 @@ func main() {
 
 		go func() {
 			sig := <-sigChan
-			log.Infof("Received SIG %s, forwarding to child\n", sig)
+			log.Infof("Received SIG %s, forwarding to child", sig)
 			_ = cmd.Process.Signal(sig)
 		}()
 
 		var wstatus syscall.WaitStatus
 		var rusage syscall.Rusage
 
-		wpid, err := syscall.Wait4(pidServers, &wstatus, 0, &rusage)
+		_, err = syscall.Wait4(pidServers, &wstatus, 0, &rusage)
 		if err != nil {
 			log.Fatalf("wait4: %v", err)
 		}
-		log.Infof("wait4: PID: %d\n", wpid)
 	}
 }
 
@@ -190,7 +187,7 @@ func (s *UnixServer) Start() error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Infof("Accept error: %v\n", err)
+			log.Infof("Accept error: %v", err)
 			continue
 		}
 
@@ -201,9 +198,9 @@ func (s *UnixServer) Start() error {
 func (s *UnixServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// Check if connection is a Unix Connection.
 	_, ok := conn.(*net.UnixConn)
 	if !ok {
-		log.Infof("Not a unix connection")
 		return
 	}
 
@@ -212,14 +209,14 @@ func (s *UnixServer) handleConnection(conn net.Conn) {
 		line := scanner.Text()
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
-			conn.Write([]byte("ERROR invalid command\n"))
+			conn.Write([]byte("ERROR invalid command"))
 			continue
 		}
 
 		cmd := parts[0]
 		switch cmd {
 		case "GET":
-			var pid int
+			var pid uint32
 			fmt.Sscanf(parts[1], "%d", &pid)
 
 			logs, _ := app.FetchLogs(pid)

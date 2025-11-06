@@ -26,7 +26,7 @@ var CGROUP_WITPROX = "/sys/fs/cgroup/witprox"
 
 func setupEBPF() []link.Link {
 	// Load redirect object, and pin all the maps.
-	log.Infof("Setting up eBFP...\n")
+	log.Infof("Setting up eBFP...")
 	redirectColl, err := pinMaps(redirectObj, "/sys/fs/bpf/")
 	if err != nil {
 		log.Fatal(err)
@@ -71,17 +71,17 @@ func setupEBPF() []link.Link {
 	for name, m := range redirectColl.Programs {
 		pp := filepath.Join("/sys/fs/bpf/redirect", name)
 		if err := m.Pin(pp); err != nil {
-			log.Fatalf("pin prog %s: %v\n", name, err)
+			log.Fatalf("pin prog %s: %v", name, err)
 		}
-		log.Infof("pinned prog %s to %s\n", name, pp)
+		log.Infof("pinned prog %s to %s", name, pp)
 	}
 
 	for name, m := range witproxColl.Programs {
 		pp := filepath.Join("/sys/fs/bpf/witprox", name)
 		if err := m.Pin(pp); err != nil {
-			log.Fatalf("pin prog %s: %v\n", name, err)
+			log.Fatalf("pin prog %s: %v", name, err)
 		}
-		log.Infof("pinned prog %s to %s\n", name, pp)
+		log.Infof("pinned prog %s to %s", name, pp)
 	}
 
 	programLinks := make([]link.Link, 0)
@@ -98,11 +98,11 @@ func setupEBPF() []link.Link {
 
 func cleanUpEBPF() {
 	// Remove the attached programs.
-	log.Infof("Tearing down eBPF setups\n")
+	log.Infof("Tearing down eBPF setups")
 	if activeLinks != nil {
 		for _, l := range activeLinks {
 			if err := l.Close(); err != nil {
-				log.Infof("error closing link: %v\n", err)
+				log.Infof("error closing link: %v", err)
 			}
 		}
 		activeLinks = nil
@@ -122,14 +122,14 @@ func cleanUpEBPF() {
 
 	for _, path := range pinnedObjects {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Infof("failed to remove pinned map: %s: %v\n", path, err)
+			log.Infof("failed to remove pinned map: %s: %v", path, err)
 		}
 	}
 
 	// Delete cgroups.
 	for _, cg := range []string{CGROUP_REDIRECT, CGROUP_WITPROX} {
 		if err := os.Remove(cg); err != nil && !os.IsNotExist(err) {
-			log.Infof("failed to remove cgroup %s: %v\n", cg, err)
+			log.Infof("failed to remove cgroup %s: %v", cg, err)
 		}
 	}
 
@@ -139,16 +139,16 @@ func cleanUpEBPF() {
 func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
 	if err != nil {
-		return nil, fmt.Errorf("load collection spec: %w", err)
+		return nil, log.Errorf("load collection spec: %w", err)
 	}
 
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
-		return nil, fmt.Errorf("create collection: %w", err)
+		return nil, log.Errorf("create collection: %w", err)
 	}
 
 	if err := os.MkdirAll(pinPath, 0755); err != nil {
-		return nil, fmt.Errorf("mkdir pin path: %w", err)
+		return nil, log.Errorf("mkdir pin path: %w", err)
 	}
 
 	for name, m := range coll.Maps {
@@ -157,7 +157,7 @@ func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 		}
 		p := filepath.Join(pinPath, name)
 		if err := m.Pin(p); err != nil {
-			return nil, fmt.Errorf("pin map %s: %w", name, err)
+			return nil, log.Errorf("pin map %s: %w", name, err)
 		}
 	}
 
@@ -166,7 +166,7 @@ func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 
 func createCgroup(path string) error {
 	if err := os.MkdirAll(path, 0755); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("mkdir cgroup: %w", err)
+		return log.Errorf("mkdir cgroup: %w", err)
 	}
 
 	return nil
@@ -181,7 +181,7 @@ func attachProgram(cgroup string, path string, attachType ebpf.AttachType) link.
 	})
 
 	if err != nil {
-		log.Fatalf("attach cgroup: witness track_conn\n")
+		log.Fatalf("attach cgroup: witness track_conn")
 	}
 
 	return l
