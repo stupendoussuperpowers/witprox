@@ -40,6 +40,8 @@ var (
 	UDPListener  *net.UDPConn
 	Config       WitproxConfig
 	NetworkStore map[uint32][]networklog.Packet
+	pidOrder     []uint32
+	mapMu        sync.Mutex
 )
 
 // helper to print a full dump of NetworkStore
@@ -59,22 +61,51 @@ func printNetworkStoreState(prefix string) {
 	fmt.Println("==============================")
 }
 
+func InitNetworkStore() {
+	NetworkStore = make(map[uint32][]networklog.Packet)
+}
+
+// Only store 100 PIDs at any given time.
+// Evict unread PIDs in FIFO manner once over this threshold.
 func StoreLog(pid uint32, pkt networklog.Packet) {
+	mapMu.Lock()
+	defer mapMu.Unlock()
+
+	if _, exists := NetworkStore[pid]; !exists {
+		pidOrder = append(pidOrder, pid)
+	}
+
 	NetworkStore[pid] = append(NetworkStore[pid], pkt)
-	if Config.Verbose {
-		printNetworkStoreState(fmt.Sprintf("store %d", pid))
+
+	if len(pidOrder) > 100 {
+		delete(NetworkStore, pidOrder[0])
+		pidOrder = pidOrder[1:]
 	}
 }
 
 func FetchLogs(pid uint32) ([]networklog.Packet, bool) {
+	mapMu.Lock()
+	defer mapMu.Unlock()
+
 	entries, ok := NetworkStore[pid]
 	if Config.Verbose {
 		printNetworkStoreState(fmt.Sprintf("fetch %d", pid))
 	}
-	delete(NetworkStore, pid)
+
+	if ok {
+		delete(NetworkStore, pid)
+
+		for i, id := range pidOrder {
+			if id == pid {
+				pidOrder = append(pidOrder[:i], pidOrder[i+1:]...)
+			}
+		}
+	}
+
 	return entries, ok
 }
 
+// Logger utils.
 var logMu sync.Mutex
 
 type Logger struct {

@@ -19,7 +19,7 @@ import (
 
 	"github.com/stupendoussuperpowers/witprox/pkg/app"
 	"github.com/stupendoussuperpowers/witprox/pkg/certificates"
-	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
+	//	"github.com/stupendoussuperpowers/witprox/pkg/networklog"
 	"github.com/stupendoussuperpowers/witprox/pkg/tcp"
 	"github.com/stupendoussuperpowers/witprox/pkg/udp"
 )
@@ -78,7 +78,8 @@ func main() {
 		userver := &UnixServer{
 			socketPath: SOCKET_PATH,
 		}
-		app.NetworkStore = make(map[uint32][]networklog.Packet)
+
+		app.InitNetworkStore()
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		go tcp.ServeTCP()

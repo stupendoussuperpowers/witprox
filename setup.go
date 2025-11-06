@@ -139,16 +139,16 @@ func cleanUpEBPF() {
 func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
 	if err != nil {
-		return nil, log.Errorf("load collection spec: %w", err)
+		return nil, log.Errorf("load collection spec: %v", err)
 	}
 
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
-		return nil, log.Errorf("create collection: %w", err)
+		return nil, log.Errorf("create collection: %v", err)
 	}
 
 	if err := os.MkdirAll(pinPath, 0755); err != nil {
-		return nil, log.Errorf("mkdir pin path: %w", err)
+		return nil, log.Errorf("mkdir pin path: %v", err)
 	}
 
 	for name, m := range coll.Maps {
@@ -157,7 +157,7 @@ func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 		}
 		p := filepath.Join(pinPath, name)
 		if err := m.Pin(p); err != nil {
-			return nil, log.Errorf("pin map %s: %w", name, err)
+			return nil, log.Errorf("pin map %s: %v", name, err)
 		}
 	}
 
@@ -166,7 +166,7 @@ func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
 
 func createCgroup(path string) error {
 	if err := os.MkdirAll(path, 0755); err != nil && !os.IsExist(err) {
-		return log.Errorf("mkdir cgroup: %w", err)
+		return log.Errorf("mkdir cgroup: %v", err)
 	}
 
 	return nil
