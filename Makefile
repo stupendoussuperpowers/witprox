@@ -1,7 +1,6 @@
 BPF_DIR := internal/bpf
 BPF_FLAGS := -O2 -g -target bpf 
 
-GO_FILES := main.go setup.go
 GO_OUTPUT := witnessd
 
 BPF_OUTPUT := $(BPF_DIR)/redirect.o $(BPF_DIR)/witprox.o 
@@ -18,9 +17,9 @@ $(BPF_DIR)/%.o: $(BPF_DIR)/%.bpf.c
 
 bpf: $(BPF_OUTPUT)
 
-build: $(GO_FILES)
+build:
 	mkdir -p bin
-	go build -o ./bin/$(GO_OUTPUT) $(GO_FILES)
+	go build -o ./bin/$(GO_OUTPUT) ./
 
 clean: 
 	rm -f $(BPF_OUTPUT) ./bin/$(GO_OUTPUT)

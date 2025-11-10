@@ -1,15 +1,27 @@
+//go:build linux
+
 package main
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"golang.org/x/sys/unix"
+
+	"github.com/stupendoussuperpowers/witprox/pkg/app"
 )
 
 // The eBPF binaries are embedded below. Use make all to ensure these .o files
@@ -24,7 +36,90 @@ var redirectObj []byte
 var CGROUP_REDIRECT = "/sys/fs/cgroup/redirect"
 var CGROUP_WITPROX = "/sys/fs/cgroup/witprox"
 
-func setupEBPF() []link.Link {
+var activeLinks []link.Link
+
+// For witnessd communication, witness sends a message through this UNIX socket
+// with PID, witnessd responds with list of network calls.
+type UnixServer struct {
+	socketPath string
+	listener   net.Listener
+}
+
+func (s *UnixServer) Start() error {
+	os.Remove(SOCKET_PATH)
+
+	listener, err := net.Listen("unix", SOCKET_PATH)
+	if err != nil {
+		return fmt.Errorf("failed to create socket: %w", err)
+	}
+
+	s.listener = listener
+
+	if err := os.Chmod(SOCKET_PATH, 0600); err != nil {
+		return fmt.Errorf("failed to set socket permissions: %w", err)
+	}
+
+	log.Info("Daemon socket listening")
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Infof("Accept error: %v", err)
+			continue
+		}
+
+		go s.handleConnection(conn)
+	}
+}
+
+func (s *UnixServer) Close() {
+	s.listener.Close()
+}
+
+func (s *UnixServer) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Check if connection is a Unix Connection.
+	_, ok := conn.(*net.UnixConn)
+	if !ok {
+		return
+	}
+
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			conn.Write([]byte("ERROR invalid command"))
+			continue
+		}
+
+		cmd := parts[0]
+		switch cmd {
+		case "GET":
+			var pid uint32
+			fmt.Sscanf(parts[1], "%d", &pid)
+
+			logs, _ := app.FetchLogs(pid)
+
+			for _, log := range logs {
+				data, _ := json.Marshal(log)
+				conn.Write(append(data, '\n'))
+			}
+			conn.Write([]byte("END\n"))
+		}
+	}
+}
+
+func createComm() CommServer {
+	log.Infof("Starting communication socket")
+	return &UnixServer{
+		socketPath: SOCKET_PATH,
+	}
+}
+
+// Setup eBPF directories, pins, maps, and programs that are required for linux tracing.
+func setupTracing() {
 	// Load redirect object, and pin all the maps.
 	log.Infof("Setting up eBFP...")
 	redirectColl, err := pinMaps(redirectObj, "/sys/fs/bpf/")
@@ -93,10 +188,11 @@ func setupEBPF() []link.Link {
 
 	// The attachments are only valid so long as their links are still in memory.
 	// To ensure that the GC doesn't eat them up, we return it and store it in a global variable.
-	return programLinks
+	// 	return programLinks
+	activeLinks = programLinks
 }
 
-func cleanUpEBPF() {
+func cleanUpTracing() {
 	// Remove the attached programs.
 	log.Infof("Tearing down eBPF setups")
 	if activeLinks != nil {
@@ -134,6 +230,64 @@ func cleanUpEBPF() {
 	}
 
 	log.Info("eBPF cleanup complete.")
+}
+
+func runServers() {
+	// Launch the servers inside the cgroup WITPROX.
+	args := append([]string{"--servers"}, app.Config.Cli()...)
+	cmd := exec.Command(os.Args[0], args...)
+
+	cgroupFD, err := unix.Open(CGROUP_WITPROX, unix.O_PATH, 0)
+	if err != nil {
+		log.Info("Couldn't run network tracing:", err)
+		return
+	}
+	cmd.SysProcAttr = &unix.SysProcAttr{
+		CgroupFD:    cgroupFD,
+		UseCgroupFD: true,
+	}
+
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("failed to start servers: %v", err)
+	}
+
+	// Copy over logs from --servers process to the main Stdout/Stderr log
+	go func(r io.Reader, w io.Writer) {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "%s\n", scanner.Text())
+		}
+	}(stdoutPipe, os.Stdout)
+
+	go func(r io.Reader, w io.Writer) {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "%s\n", scanner.Text())
+		}
+	}(stderrPipe, os.Stderr)
+
+	pidServers := cmd.Process.Pid
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		log.Infof("Received SIG %s, forwarding to child", sig)
+		_ = cmd.Process.Signal(sig)
+	}()
+
+	var wstatus syscall.WaitStatus
+	var rusage syscall.Rusage
+
+	_, err = syscall.Wait4(pidServers, &wstatus, 0, &rusage)
+	if err != nil {
+		log.Fatalf("wait4: %v", err)
+	}
+
 }
 
 func pinMaps(bpfBytes []byte, pinPath string) (*ebpf.Collection, error) {
